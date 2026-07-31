@@ -72,6 +72,7 @@ export function htmlToMarkdown(html: string): string {
   const title = titleMatch ? cleanText(titleMatch[1]) : "";
 
   let text = html
+    .replace(/<title[^>]*>[\s\S]*?<\/title>/gi, " ")
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
     .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
@@ -92,8 +93,11 @@ export function htmlToMarkdown(html: string): string {
     .replace(/<\/(?:em|i)>/gi, "*")
     .replace(/<[^>]+>/g, " ")
     .replace(/[ \t]+/g, " ")
+    .replace(/```\n+```/g, "```")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+
+  text = decodeEntities(text);
 
   if (title && !text.startsWith(title)) {
     text = `# ${title}\n\n${text}`;

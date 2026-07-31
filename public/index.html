@@ -69,6 +69,15 @@
       flex-shrink: 0;
     }
     header .title { font-size: 1.1rem; font-weight: 700; margin: 0; }
+    header .version {
+      font-size: 0.7rem;
+      font-weight: 400;
+      color: var(--muted);
+      background: var(--surface-2);
+      border-radius: 999px;
+      padding: 0.15rem 0.5rem;
+      vertical-align: middle;
+    }
     header .spacer { flex: 1; }
     header .user-badge {
       font-size: 0.9rem;
@@ -403,7 +412,7 @@
 </head>
 <body>
   <header>
-    <h1 class="title"><span>🪢</span> Yoke</h1>
+    <h1 class="title"><span>🪢</span> Yoke <span id="app-version" class="version" title="Version"></span></h1>
     <span class="spacer"></span>
     <select id="project-select" title="Project (work directory)" hidden>
       <option value="0">Default workspace</option>
@@ -460,7 +469,9 @@
         </div>
         <input id="host-key" type="text" placeholder="Path to private key (e.g. C:\Users\me\.ssh\id_rsa)" autocomplete="off">
         <input id="host-password" type="password" placeholder="SSH password" autocomplete="off" hidden>
-        <div class="hint">Passwords are stored in the database.</div>
+        <label for="host-sudo-password">Sudo password (optional)</label>
+        <input id="host-sudo-password" type="password" placeholder="Blank = reuse the SSH password" autocomplete="off">
+        <div class="hint">Passwords are stored in the database and sent over SSH via stdin, never in command text.</div>
         <div class="row">
           <button type="button" id="host-cancel" class="icon-btn">Cancel</button>
           <button type="button" id="host-save" class="icon-btn">Add host</button>
@@ -540,6 +551,16 @@
     }
 
     /* ---------- Theme ---------- */
+    (async () => {
+      try {
+        const res = await fetch('/api/version');
+        if (res.ok) {
+          const data = await res.json();
+          document.getElementById('app-version').textContent = `v${data.version}`;
+        }
+      } catch { /* ignore */ }
+    })();
+
     function applyTheme(theme) {
       document.documentElement.dataset.theme = theme;
       document.getElementById('dark-toggle').textContent = theme === 'dark' ? '☀️' : '🌙';
@@ -610,6 +631,7 @@
         saveAuth(await authRequest('/api/login', { username, password }));
         await refreshStatus();
         await refreshSubagents();
+        await refreshHosts();
       } catch (err) {
         showAuthError(err.message);
       }
@@ -648,6 +670,7 @@
         renderAuth();
         await refreshStatus();
         await refreshSubagents();
+        await refreshHosts();
       } catch {
         renderAuth();
       }
@@ -1044,11 +1067,63 @@
       }
     }
 
+    async function restoreContext() {
+      try {
+        const res = await fetch('/api/restore', { method: 'POST', headers: authHeaders() });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        addSystemMessage(`Restored ${data.restored} archived message(s) to the context.`);
+      } catch (err) {
+        addError(`Restore failed: ${err.message}`);
+      }
+    }
+
+    function renderHistory(messages) {
+      if (!messages || messages.length === 0) {
+        addAssistant('_No history for this project yet._');
+        return;
+      }
+      const lines = [`### History (${messages.length})`];
+      for (const m of [...messages].reverse()) {
+        const mark = m.status === 'archived' ? '🗄️' : '💬';
+        if (m.role === 'user') {
+          lines.push(`- ${mark} **user**: ${String(m.content || '').slice(0, 200)}`);
+        } else if (m.role === 'assistant') {
+          if (m.tool_calls && m.tool_calls.length > 0) {
+            for (const tc of m.tool_calls) {
+              lines.push(`- ${mark} **tool_call**: \`${tc.function.name}\` — ${tc.function.arguments.slice(0, 120)}`);
+            }
+          } else {
+            lines.push(`- ${mark} **assistant**: ${String(m.content || '').slice(0, 200)}`);
+          }
+        } else if (m.role === 'tool') {
+          lines.push(`- ${mark} **tool response** (${m.tool_call_id}): ${String(m.content || '').slice(0, 200)}`);
+        } else {
+          lines.push(`- ${mark} **${m.role}**: ${String(m.content || '').slice(0, 200)}`);
+        }
+      }
+      lines.push('\n_🗄️ archived (removed from context but kept) · 💬 active_');
+      addAssistant(lines.join('\n'));
+    }
+
+    async function showHistory(n) {
+      try {
+        const res = await fetch(`/api/history?limit=${n}`, { headers: authHeaders() });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        renderHistory(data.messages);
+      } catch (err) {
+        addError(`History failed: ${err.message}`);
+      }
+    }
+
     /* ---------- Slash commands ---------- */
     const SLASH_HELP = [
       ['/help', 'Show this list of commands'],
       ['/clear', 'Clear the conversation and reset agent context'],
       ['/reset', 'Reset agent context only (keeps the transcript)'],
+      ['/restore', 'Bring archived messages back into the agent context'],
+      ['/history [n]', 'Show the full message history (including archived, default 20)'],
       ['/compact [n]', 'Keep only the last n messages of agent context (default 8)'],
       ['/summarize', 'Replace agent context with an LLM summary of the conversation'],
       ['/usage', 'Show context size and token usage'],
@@ -1058,6 +1133,10 @@
       ['/search <query>', 'Search indexed symbols and files'],
       ['/web <query>', 'Search the web'],
       ['/fetch <url>', 'Fetch a web page and show it as markdown'],
+      ['/hosts', 'List remote hosts'],
+      ['/hoststatus <host>', 'Check a remote host (uptime, disk, memory)'],
+      ['/ssh <host> <command>', 'Run a command on a remote host (requires approval)'],
+      ['/deploy <host> [project=<name>] [remote_path=<path>] [post_deploy=<cmd>]', 'Deploy a project to a remote host (requires approval)'],
       ['/status', 'Show account, project, theme, and index status'],
       ['/project [name]', 'List projects or switch by name. Create/edit/delete: /project create|update|delete ...'],
       ['/theme <dark|light|toggle>', 'Switch the color theme'],
@@ -1086,7 +1165,8 @@
         const u = data.usage;
         let msg = '### Usage\n\n' +
           `- **Model:** \`${data.model}\`\n` +
-          `- **Conversation messages:** ${data.context.messages}\n` +
+          `- **Active context messages:** ${data.context.messages}\n` +
+          `- **History (incl. archived):** ${data.context.history}\n` +
           `- **Estimated context tokens:** ~${data.context.estimated_tokens.toLocaleString()}\n\n` +
           `**API usage** (${u.runs} run${u.runs === 1 ? '' : 's'}):\n` +
           `- **Total tokens:** ${u.total_tokens.toLocaleString()}\n` +
@@ -1503,6 +1583,7 @@
       document.querySelector('input[name="host-auth"][value="password"]').checked = authType === 'password';
       document.getElementById('host-key').value = host ? host.key_path : '';
       document.getElementById('host-password').value = '';
+      document.getElementById('host-sudo-password').value = '';
       document.getElementById('host-save').textContent = host ? 'Save changes' : 'Add host';
       document.getElementById('host-name').disabled = !!host;
       syncHostAuthFields();
@@ -1526,13 +1607,14 @@
       const authType = document.querySelector('input[name="host-auth"]:checked').value;
       const keyPath = document.getElementById('host-key').value.trim();
       const password = document.getElementById('host-password').value;
+      const sudoPassword = document.getElementById('host-sudo-password').value;
       if (!name || !host || !user) { alert('Name, address, and user are required.'); return; }
       try {
         const url = editingHostId ? `/api/hosts/${editingHostId}` : '/api/hosts';
         const res = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...authHeaders() },
-          body: JSON.stringify({ name, host, port, user, auth_type: authType, key_path: keyPath, password }),
+          body: JSON.stringify({ name, host, port, user, auth_type: authType, key_path: keyPath, password, sudo_password: sudoPassword }),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
@@ -1545,6 +1627,7 @@
     });
 
     async function remoteAction(action, hostId, body, doneText) {
+      startApprovalPolling();
       try {
         const res = await fetch(`/api/hosts/${hostId}/${action}`, {
           method: 'POST',
@@ -1556,7 +1639,77 @@
         addAssistant((data.output || doneText || '').replace(/```/g, '``\u200b`'));
       } catch (err) {
         addError(`${action} failed: ${err.message}`);
+      } finally {
+        await pollApprovals();
       }
+    }
+
+    function findHostByName(name) {
+      return hostsCache.find((h) => h.name.toLowerCase() === name.toLowerCase()) || null;
+    }
+
+    async function refreshHostsForCommand() {
+      const res = await fetch('/api/hosts', { headers: authHeaders() });
+      const data = await res.json();
+      hostsCache = data.hosts || [];
+    }
+
+    async function listHostsCommand() {
+      try {
+        await refreshHostsForCommand();
+        renderHosts(hostsCache);
+        if (hostsCache.length === 0) {
+          addAssistant('_No hosts configured. Use the ＋ Add host button in the hosts panel._');
+          return;
+        }
+        let msg = '### Remote hosts\n\n';
+        for (const h of hostsCache) {
+          msg += `- **${h.name}** — \`${h.user}@${h.host}:${h.port}\` (${h.auth_type})\n`;
+        }
+        msg += '\n_Use `/ssh <host> <command>`, `/hoststatus <host>`, or `/deploy <host>`._';
+        addAssistant(msg);
+      } catch (err) {
+        addError(`Failed to list hosts: ${err.message}`);
+      }
+    }
+
+    async function execHostCommand(hostName, command) {
+      const host = findHostByName(hostName);
+      if (!host) { addError(`Unknown host '${hostName}'. Use /hosts to list.`); return; }
+      addSystemMessage(`🖥️ ${hostName}: ${command}`);
+      await remoteAction('exec', host.id, { command });
+    }
+
+    async function hostStatusCommand(hostName) {
+      const host = findHostByName(hostName);
+      if (!host) { addError(`Unknown host '${hostName}'. Use /hosts to list.`); return; }
+      addSystemMessage(`🖥️ Checking ${hostName}...`);
+      await remoteAction('status', host.id, {});
+    }
+
+    async function deployCommand(hostName, arg) {
+      const host = findHostByName(hostName);
+      if (!host) { addError(`Unknown host '${hostName}'. Use /hosts to list.`); return; }
+      let project = null;
+      let remotePath = '';
+      let postDeploy = '';
+      for (const tok of arg.split(/\s+/)) {
+        if (tok.startsWith('project=')) project = tok.slice(8);
+        else if (tok.startsWith('remote_path=')) remotePath = tok.slice(12);
+        else if (tok.startsWith('post_deploy=')) postDeploy = tok.slice(12);
+      }
+      if (!project) {
+        try {
+          const st = await fetch('/api/status', { headers: authHeaders() }).then((r) => r.json());
+          project = st.project ? st.project.name : null;
+        } catch { /* ignore */ }
+      }
+      if (!project) { addError('No project specified and no active project. Use /deploy <host> project=<name>'); return; }
+      const body = { project_name: project };
+      if (remotePath) body.remote_path = remotePath;
+      if (postDeploy) body.post_deploy = postDeploy;
+      addSystemMessage(`📦 Deploying '${project}' to ${hostName}...`);
+      await remoteAction('deploy', host.id, body);
     }
 
     /* ---------- Model selection ---------- */
@@ -1701,6 +1854,15 @@
           addSystemMessage('Agent context reset — next task starts a fresh conversation.');
           break;
         }
+        case 'restore':
+          await restoreContext();
+          break;
+        case 'history': {
+          const n = arg ? parseInt(arg, 10) : 20;
+          if (isNaN(n) || n < 1) { addError('Usage: /history [n]'); break; }
+          await showHistory(Math.min(n, 200));
+          break;
+        }
         case 'compact': {
           const n = arg ? parseInt(arg, 10) : 8;
           if (isNaN(n) || n < 1) {
@@ -1744,6 +1906,26 @@
           const m = arg.match(/^(https?:\/\/\S+)/i);
           if (!m) { addError('Usage: /fetch <url> (must start with http:// or https://)'); break; }
           await webAction('fetch', m[1]);
+          break;
+        }
+        case 'hosts':
+          await listHostsCommand();
+          break;
+        case 'hoststatus': {
+          if (!arg) { addError('Usage: /hoststatus <host>'); break; }
+          await hostStatusCommand(arg);
+          break;
+        }
+        case 'ssh': {
+          const [hostName, ...cmdParts] = arg.split(/\s+/);
+          if (!hostName || cmdParts.length === 0) { addError('Usage: /ssh <host> <command>'); break; }
+          await execHostCommand(hostName, cmdParts.join(' '));
+          break;
+        }
+        case 'deploy': {
+          const [hostName, ...rest] = arg.split(/\s+/);
+          if (!hostName) { addError('Usage: /deploy <host> [project=<name>] [remote_path=<path>]'); break; }
+          await deployCommand(hostName, rest.join(' '));
           break;
         }
         case 'status':

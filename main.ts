@@ -7,7 +7,7 @@ import { ensureWorkspace, workspacePath } from "./tools.ts";
 import { loadOrCreateTls } from "./certs.ts";
 import { AuthError, cleanupExpiredSessions, extractToken, getUserByToken, loginUser, logoutSession, type AuthUser } from "./auth.ts";
 import { indexWorkspace, indexStats, searchSymbols, searchFiles } from "./index.ts";
-import { compactConversation, estimateTokens, getConversation, getMaxIterationsForUser, recordUsage, resetConversation, saveConversation, setMaxIterationsForUser, usageSummary } from "./context.ts";
+import { appendConversation, archiveAllActive, compactConversation, conversationStats, estimateTokens, getConversation, getHistory, getMaxIterationsForUser, recordUsage, resetConversation, restoreConversation, setMaxIterationsForUser, usageSummary } from "./context.ts";
 import { ALLOWED_MODELS, getModelForUser, setModelForUser } from "./models.ts";
 import { spawnSubagent, listSubagents, statusOf } from "./subagents.ts";
 import { DEFAULT_MAX_ITERATIONS, DEFAULT_SUBAGENT_MAX_ITERATIONS } from "./agent.ts";
@@ -18,6 +18,9 @@ import {
   createHost, deleteHost, formatExecResult, getHost, listHosts, publicHost, sftpReadFile, sftpUploadFile,
   sshDeploy, sshExec, sshHomeDir, sshStatus, truncate, updateHost, type Host,
 } from "./hosts.ts";
+import appConfig from "./deno.json" with { type: "json" };
+
+const APP_VERSION: string = (appConfig as { version?: string }).version ?? "0.0.0";
 
 function errString(err: unknown): string {
   if (err instanceof Error) return err.message;
@@ -128,6 +131,10 @@ async function handleApi(request: Request): Promise<Response> {
   const path = url.pathname;
   const method = request.method;
 
+  if (path === "/api/version" && method === "GET") {
+    return json({ version: APP_VERSION });
+  }
+
   if (path === "/api/login" && method === "POST") {
     try {
       const body = await readJson(request);
@@ -159,6 +166,7 @@ async function handleApi(request: Request): Promise<Response> {
     const project = projectId != null ? getProject(projectId) : null;
     const workspace = getEffectiveWorkspace(auth.user.id, projectId);
     const messages = getConversation(auth.user.id, projectId ?? 0);
+    const stats = conversationStats(auth.user.id, projectId ?? 0);
     return json({
       user: auth.user,
       model: getEffectiveModel(auth.user.id, projectId),
@@ -170,11 +178,28 @@ async function handleApi(request: Request): Promise<Response> {
       workspace,
       index: indexStats(workspace),
       context: {
-        messages: messages.length,
+        messages: stats.active,
+        history: stats.history,
         estimated_tokens: estimateTokens(messages),
       },
       usage: usageSummary(auth.user.id),
     });
+  }
+
+  if (path === "/api/history" && method === "GET") {
+    const auth = requireAuth(request);
+    if (auth instanceof Response) return auth;
+    const projectId = getActiveProjectId(auth.user.id) ?? 0;
+    const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 50, 1), 200);
+    return json({ messages: getHistory(auth.user.id, projectId, limit) });
+  }
+
+  if (path === "/api/restore" && method === "POST") {
+    const auth = requireAuth(request);
+    if (auth instanceof Response) return auth;
+    const projectId = getActiveProjectId(auth.user.id) ?? 0;
+    const restored = restoreConversation(auth.user.id, projectId);
+    return json({ restored });
   }
 
   if (path === "/api/projects" && method === "GET") {
@@ -321,12 +346,12 @@ async function handleApi(request: Request): Promise<Response> {
       const nonSystem = messages.filter((m) => m.role !== "system");
       if (nonSystem.length === 0) return json({ error: "Nothing to summarize yet." }, 400);
       const { summary, usage } = await summarizeConversation(messages, model);
-      const newContext: ChatMessage[] = [
-        { role: "system", content: SYSTEM_PROMPT },
+      archiveAllActive(auth.user.id, projectId);
+      appendConversation(auth.user.id, projectId, [
         { role: "user", content: `Summary of the conversation so far:\n\n${summary}` },
-      ];
-      saveConversation(auth.user.id, newContext, projectId);
+      ]);
       recordUsage(auth.user.id, usage, model);
+      const newContext = getConversation(auth.user.id, projectId);
       return json({
         summary,
         kept: newContext.filter((m) => m.role !== "system").length,
@@ -463,6 +488,7 @@ async function handleApi(request: Request): Promise<Response> {
         body.auth_type === "password" ? "password" : "key",
         String(body.key_path ?? ""),
         String(body.password ?? ""),
+        String(body.sudo_password ?? ""),
       );
       return json({ host: publicHost(host) }, 201);
     } catch (err) {
@@ -553,6 +579,7 @@ async function handleApi(request: Request): Promise<Response> {
         auth_type: body.auth_type !== undefined ? String(body.auth_type) : undefined,
         key_path: body.key_path !== undefined ? String(body.key_path) : undefined,
         password: body.password !== undefined ? String(body.password) : undefined,
+        sudo_password: body.sudo_password !== undefined ? String(body.sudo_password) : undefined,
       });
       if (!host) return json({ error: "Host not found." }, 404);
       return json({ host: publicHost(host) });
@@ -615,6 +642,7 @@ async function handleApi(request: Request): Promise<Response> {
           // Load this user's persistent conversation for the active project;
           // runAgent appends the new task and mutates the array as it goes.
           const conversation = getConversation(auth.user.id, projectId) as ChatMessage[];
+          const before = conversation.length;
 
           runAgent(conversation, task, (event: AgentEvent) => {
             const data = JSON.stringify(event);
@@ -624,7 +652,9 @@ async function handleApi(request: Request): Promise<Response> {
             maxIterations: getMaxIterationsForUser(auth.user.id) ?? undefined,
             workspace,
           }).then((result) => {
-            saveConversation(auth.user.id, conversation, projectId);
+            // Append only the messages produced by this run; earlier history
+            // rows are never rewritten or deleted.
+            appendConversation(auth.user.id, projectId, conversation.slice(before));
             recordUsage(auth.user.id, result.usage, model);
             controller.close();
           }).catch((err) => {

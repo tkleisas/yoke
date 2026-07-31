@@ -3,3 +3,6 @@ certs/
 
 # local sqlite database
 *.db
+
+# test artifacts
+.test-data/

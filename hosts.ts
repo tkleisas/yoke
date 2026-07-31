@@ -16,6 +16,7 @@ export type Host = {
   auth_type: "key" | "password";
   key_path: string;
   password: string;
+  sudo_password: string;
   created_at: number;
 };
 
@@ -31,6 +32,7 @@ function rowToHost(row: {
   auth_type: string;
   key_path: string;
   password: string;
+  sudo_password: string;
   created_at: number;
 }): Host {
   return {
@@ -42,66 +44,42 @@ function rowToHost(row: {
     auth_type: row.auth_type === "password" ? "password" : "key",
     key_path: row.key_path,
     password: row.password,
+    sudo_password: row.sudo_password,
     created_at: row.created_at,
   };
 }
 
 function publicHost(row: Host) {
-  return { ...row, password: row.password ? "•••" : "" };
+  return { ...row, password: row.password ? "•••" : "", sudo_password: row.sudo_password ? "•••" : "" };
 }
 
+const HOST_COLUMNS = "id, name, host, port, user, auth_type, key_path, password, sudo_password, created_at";
+
+type HostRow = {
+  id: number;
+  name: string;
+  host: string;
+  port: number;
+  user: string;
+  auth_type: string;
+  key_path: string;
+  password: string;
+  sudo_password: string;
+  created_at: number;
+};
+
 export function listHosts(): Host[] {
-  const rows = db.prepare(
-    "SELECT id, name, host, port, user, auth_type, key_path, password, created_at FROM hosts ORDER BY name",
-  ).all() as Array<{
-    id: number;
-    name: string;
-    host: string;
-    port: number;
-    user: string;
-    auth_type: string;
-    key_path: string;
-    password: string;
-    created_at: number;
-  }>;
+  const rows = db.prepare(`SELECT ${HOST_COLUMNS} FROM hosts ORDER BY name`).all() as HostRow[];
   return rows.map(rowToHost);
 }
 
 export function getHost(id: number): Host | null {
-  const row = db.prepare(
-    "SELECT id, name, host, port, user, auth_type, key_path, password, created_at FROM hosts WHERE id = ?",
-  ).get(id) as
-    | {
-      id: number;
-      name: string;
-      host: string;
-      port: number;
-      user: string;
-      auth_type: string;
-      key_path: string;
-      password: string;
-      created_at: number;
-    }
-    | undefined;
+  const row = db.prepare(`SELECT ${HOST_COLUMNS} FROM hosts WHERE id = ?`).get(id) as HostRow | undefined;
   return row ? rowToHost(row) : null;
 }
 
 export function getHostByName(name: string): Host | null {
-  const row = db.prepare(
-    "SELECT id, name, host, port, user, auth_type, key_path, password, created_at FROM hosts WHERE name = ?",
-  ).get(name) as
-    | {
-      id: number;
-      name: string;
-      host: string;
-      port: number;
-      user: string;
-      auth_type: string;
-      key_path: string;
-      password: string;
-      created_at: number;
-    }
-    | undefined;
+  const row = db.prepare(`SELECT ${HOST_COLUMNS} FROM hosts WHERE name = ?`).get(name) as HostRow | undefined;
   return row ? rowToHost(row) : null;
 }
 
@@ -113,6 +91,7 @@ export function createHost(
   authType: "key" | "password",
   keyPath: string,
   password: string,
+  sudoPassword = "",
 ): Host {
   const trimmedName = name.trim();
   if (!trimmedName) throw new Error("Host name is required.");
@@ -128,14 +107,34 @@ export function createHost(
     throw new Error("Password is required for password authentication.");
   }
   const info = db.prepare(
-    "INSERT INTO hosts (name, host, port, user, auth_type, key_path, password, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-  ).run(trimmedName, host.trim(), Math.max(1, Math.min(65535, Math.floor(port))), user.trim(), authType, keyPath.trim(), password, Date.now());
+    `INSERT INTO hosts (name, host, port, user, auth_type, key_path, password, sudo_password, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    trimmedName,
+    host.trim(),
+    Math.max(1, Math.min(65535, Math.floor(port))),
+    user.trim(),
+    authType,
+    keyPath.trim(),
+    password,
+    sudoPassword,
+    Date.now(),
+  );
   return getHost(Number(info.lastInsertRowid))!;
 }
 
 export function updateHost(
   id: number,
-  fields: { name?: string; host?: string; port?: number; user?: string; auth_type?: string; key_path?: string; password?: string },
+  fields: {
+    name?: string;
+    host?: string;
+    port?: number;
+    user?: string;
+    auth_type?: string;
+    key_path?: string;
+    password?: string;
+    sudo_password?: string;
+  },
 ): Host | null {
   const existing = getHost(id);
   if (!existing) return null;
@@ -148,13 +147,17 @@ export function updateHost(
   if (!host) throw new Error("Host address cannot be empty.");
   const user = fields.user !== undefined ? fields.user.trim() : existing.user;
   if (!user) throw new Error("SSH user cannot be empty.");
-  const authType = fields.auth_type === "password" ? "password" : "key";
+  const authType = fields.auth_type !== undefined
+    ? (fields.auth_type === "password" ? "password" : "key")
+    : existing.auth_type;
   const keyPath = fields.key_path !== undefined ? fields.key_path.trim() : existing.key_path;
   const password = fields.password !== undefined ? fields.password : existing.password;
+  const sudoPassword = fields.sudo_password !== undefined ? fields.sudo_password : existing.sudo_password;
   if (authType === "key" && !keyPath) throw new Error("Key path is required for key authentication.");
   if (authType === "password" && !password) throw new Error("Password is required for password authentication.");
-  db.prepare("UPDATE hosts SET name = ?, host = ?, user = ?, auth_type = ?, key_path = ?, password = ? WHERE id = ?")
-    .run(name, host, user, authType, keyPath, password, id);
+  db.prepare(
+    "UPDATE hosts SET name = ?, host = ?, user = ?, auth_type = ?, key_path = ?, password = ?, sudo_password = ? WHERE id = ?",
+  ).run(name, host, user, authType, keyPath, password, sudoPassword, id);
   return getHost(id);
 }
 
@@ -188,6 +191,11 @@ function connectSsh(host: Host): Promise<SSHClient> {
       username: host.user,
       readyTimeout: 15_000,
       keepaliveInterval: 10_000,
+      // Avoid AES-GCM: Deno's crypto layer doesn't support setAutoPadding(false)
+      // for GCM modes, which breaks the ssh2 handshake.
+      algorithms: {
+        cipher: ["aes128-ctr", "aes192-ctr", "aes256-ctr", "aes128-cbc", "aes256-cbc"],
+      },
     };
     if (host.auth_type === "password" && host.password) {
       config.password = host.password;
@@ -206,8 +214,33 @@ function connectSsh(host: Host): Promise<SSHClient> {
 
 export type ExecResult = { code: number; stdout: string; stderr: string };
 
+const SUDO_RE = /^\s*sudo(?:\s+|$)/;
+
+function sudoPasswordFor(host: Host): string {
+  return host.sudo_password || (host.auth_type === "password" ? host.password : "");
+}
+
 export async function sshExec(host: Host, command: string, timeoutMs = SSH_TIMEOUT_MS): Promise<ExecResult> {
+  // sudo handling: run "sudo -S <cmd>" and feed the password via stdin so it
+  // never appears in the command string, process list, or approval cards.
+  // Validate before connecting so missing credentials fail fast.
+  let execCommand = command;
+  let sudoPassword: string | undefined;
+  if (SUDO_RE.test(command)) {
+    const inner = command.replace(/^\s*sudo\s*/, "");
+    if (!inner) throw new Error("Empty sudo command.");
+    sudoPassword = sudoPasswordFor(host);
+    if (!sudoPassword) {
+      throw new Error(
+        `This command needs sudo, but no sudo password is configured for host '${host.name}'. ` +
+        "Set a sudo password on the host (or configure passwordless sudo).",
+      );
+    }
+    execCommand = `sudo -S ${inner}`;
+  }
+
   const client = await connectSsh(host);
+
   return new Promise((resolve, reject) => {
     let settled = false;
     const timer = setTimeout(() => {
@@ -217,11 +250,12 @@ export async function sshExec(host: Host, command: string, timeoutMs = SSH_TIMEO
         reject(new Error(`Command timed out after ${Math.round(timeoutMs / 1000)}s.`));
       }
     }, timeoutMs);
-    client.exec(command, (err, stream) => {
+    client.exec(execCommand, (err, stream) => {
       if (err) {
         if (!settled) { settled = true; clearTimeout(timer); client.end(); reject(err); }
         return;
       }
+      if (sudoPassword !== undefined) stream.write(`${sudoPassword}\n`);
       let stdout = "";
       let stderr = "";
       stream.on("close", (code: number | undefined) => {
@@ -393,3 +427,4 @@ export function formatExecResult(result: ExecResult): string {
 }
 
 export { publicHost, truncate };
+
