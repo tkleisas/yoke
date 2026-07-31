@@ -1,8 +1,8 @@
 // hosts.ts
 // Remote server inventory and SSH operations (exec, status, SFTP transfer,
 // deploy). Uses npm:ssh2 — pure JS SSH, works on Windows without OpenSSH.
-import { Client } from "npm:ssh2@1.16.0";
-import type { Client as SSHClient, ConnectConfig, SFTPWrapper } from "npm:@types/ssh2@1.15.5";
+/// <reference path="./types/ssh2.d.ts" />
+import { Client, type ConnectConfig, type SFTPWrapper } from "npm:ssh2@1.16.0";
 import { Buffer } from "node:buffer";
 import { resolve } from "https://deno.land/std@0.224.0/path/mod.ts";
 import { db } from "./db.ts";
@@ -170,9 +170,9 @@ export function deleteHost(id: number): boolean {
 
 // ===== SSH operations =====
 
-function connectSsh(host: Host): Promise<SSHClient> {
+function connectSsh(host: Host): Promise<Client> {
   return new Promise((resolve, reject) => {
-    const client: SSHClient = new Client();
+    const client = new Client();
     const timer = setTimeout(() => {
       client.end();
       reject(new Error(`SSH connection to ${host.host}:${host.port} timed out.`));
@@ -266,8 +266,8 @@ export async function sshExec(host: Host, command: string, timeoutMs = SSH_TIMEO
           resolve({ code: code ?? -1, stdout, stderr });
         }
       });
-      stream.on("data", (d: Buffer | string) => { stdout += d.toString(); });
-      stream.stderr.on("data", (d: Buffer | string) => { stderr += d.toString(); });
+      stream.on("data", (d: string | Uint8Array) => { stdout += d.toString(); });
+      stream.stderr.on("data", (d: string | Uint8Array) => { stderr += d.toString(); });
     });
   });
 }
@@ -303,7 +303,7 @@ function sftpPromise<T>(fn: (callback: (err?: Error | null, result?: T) => void)
   });
 }
 
-function getSftp(client: SSHClient): Promise<SFTPWrapper> {
+function getSftp(client: Client): Promise<SFTPWrapper> {
   return new Promise((resolve, reject) => {
     client.sftp((err, sftp) => {
       if (err) reject(err);
@@ -427,4 +427,7 @@ export function formatExecResult(result: ExecResult): string {
 }
 
 export { publicHost, truncate };
+
+
+
 

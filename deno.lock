@@ -4,7 +4,6 @@
     "jsr:@kjanat/micro509@0.14.0": "0.14.0",
     "jsr:@std/assert@*": "1.0.19",
     "jsr:@std/internal@^1.0.12": "1.0.14",
-    "npm:@types/ssh2@1.15.5": "1.15.5",
     "npm:ssh2@1.16.0": "1.16.0"
   },
   "jsr": {
@@ -22,18 +21,6 @@
     }
   },
   "npm": {
-    "@types/node@18.19.130": {
-      "integrity": "sha512-GRaXQx6jGfL8sKfaIDD6OupbIHBr9jv7Jnaml9tB7l4v068PAOXqfcujMMo5PhbIs6ggR1XODELqahT2R8v0fg==",
-      "dependencies": [
-        "undici-types"
-      ]
-    },
-    "@types/ssh2@1.15.5": {
-      "integrity": "sha512-N1ASjp/nXH3ovBHddRJpli4ozpk6UdDYIX4RJWFa9L1YKnzdhTlVmiGHm4DZnj/jLbqZpes4aeR30EFGQtvhQQ==",
-      "dependencies": [
-        "@types/node"
-      ]
-    },
     "asn1@0.2.6": {
       "integrity": "sha512-ix/FxPn0MDjeyJ7i/yoHGFt/EX6LyNbxSEhPPXODPL+KB0VPk86UYfL0lMdy+KCnv+fmvIzySwaK5COwqVbWTQ==",
       "dependencies": [
@@ -77,9 +64,6 @@
     },
     "tweetnacl@0.14.5": {
       "integrity": "sha512-KXXFFdAbFXY4geFIwoyNK+f5Z1b7swfXABfL7HXCmoIWMKU3dmS26672A4EeQtDzLKy7SXmfBu51JolvEKwtGA=="
-    },
-    "undici-types@5.26.5": {
-      "integrity": "sha512-JlCMO+ehdEIKqlFxk6IfVoAUVmgz7cU7zD/h9XZ0qzeosSHmUJVOzSQvvYSYWXkFXC+IfLKSIffhv0sVZup6pA=="
     }
   },
   "remote": {

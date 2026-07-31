@@ -11,7 +11,7 @@ export type PendingApproval = {
 };
 
 type Entry = PendingApproval & {
-  timer: number;
+  timer: ReturnType<typeof setTimeout>;
   resolve: (approved: boolean) => void;
 };
 
@@ -37,18 +37,18 @@ export function listPendingApprovals(): PendingApproval[] {
 export function createApproval(command: string, requester: string): Promise<boolean> {
   return new Promise((resolve) => {
     const id = `appr-${nextId++}`;
+    const resolveEntry = (approved: boolean) => {
+      pending.delete(id);
+      resolve(approved);
+    };
     const entry: Entry = {
       id,
       command,
       requester,
       created_at: Date.now(),
-      timer: 0,
-      resolve: (approved) => {
-        pending.delete(id);
-        resolve(approved);
-      },
+      timer: setTimeout(() => resolveEntry(false), APPROVAL_TIMEOUT_MS),
+      resolve: resolveEntry,
     };
-    entry.timer = setTimeout(() => entry.resolve(false), APPROVAL_TIMEOUT_MS);
     pending.set(id, entry);
   });
 }

@@ -13,10 +13,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: denoland/setup-deno@v2
         with:
-          deno-version: v2.x
+          deno-version: 2.9.4 # pinned: the version Yoke is developed and tested against
       - name: Type-check
         run: deno task check
       - name: Run tests
@@ -38,10 +38,10 @@ jobs:
             binary: yoke
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: denoland/setup-deno@v2
         with:
-          deno-version: v2.x
+          deno-version: 2.9.4 # pinned: the version Yoke is developed and tested against
 
       - name: Extract version from tag
         id: version
@@ -57,7 +57,7 @@ jobs:
           sha256sum yoke-${{ steps.version.outputs.tag }}-${{ matrix.os }}.tar.gz > yoke-${{ steps.version.outputs.tag }}-${{ matrix.os }}.tar.gz.sha256
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: yoke-${{ matrix.os }}
           path: yoke-${{ steps.version.outputs.tag }}-${{ matrix.os }}.tar.gz*
@@ -66,14 +66,14 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Extract version from tag
         id: version
         run: echo "tag=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist/
           merge-multiple: true
@@ -86,10 +86,11 @@ jobs:
           if [ ! -s release_notes.md ]; then echo "No changelog entry found for v$VERSION." > release_notes.md; fi
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           name: Yoke v${{ steps.version.outputs.tag }}
           body_path: release_notes.md
           files: dist/yoke-*
           fail_on_unmatched_files: false
+

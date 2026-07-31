@@ -21,7 +21,7 @@ export type SubagentRecord = {
 const MAX_CONCURRENT = 10;
 
 const subagents = new Map<string, SubagentRecord>();
-const waiters = new Map<string, Array<{ resolve: (r: SubagentRecord) => void; timer: number }>>();
+const waiters = new Map<string, Array<{ resolve: (r: SubagentRecord) => void; timer: ReturnType<typeof setTimeout> }>>();
 let nextId = 1;
 
 function makeId(): string {

@@ -4,6 +4,7 @@
 //
 // IMPORTANT: this file must be the FIRST import in any test file that uses
 // the database, so table truncation runs before other modules load.
+/// <reference path="../types/ssh2.d.ts" />
 import { Server } from "npm:ssh2@1.16.0";
 import SFTPStream from "npm:ssh2@1.16.0/lib/protocol/SFTP.js";
 import { Buffer } from "node:buffer";
@@ -62,7 +63,7 @@ export async function startSshServer(): Promise<{ port: number }> {
               stream.exit(code);
               stream.end();
             };
-            stream.on("data", (d: Buffer | string) => {
+            stream.on("data", (d: string | Uint8Array) => {
               pw += d.toString();
               if (pw.includes("\n")) {
                 const entered = pw.slice(0, pw.indexOf("\n")).trim();
@@ -202,5 +203,6 @@ export async function makeDeploySource(): Promise<string> {
   await Deno.writeTextFile(`${dir}/sub/config.json`, '{"port": 8080}\n');
   return dir;
 }
+
 
 
