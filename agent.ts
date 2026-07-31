@@ -1,7 +1,10 @@
 // agent.ts
+import { resolve } from "https://deno.land/std@0.224.0/path/mod.ts";
 import { readFileTool, writeFileTool, listDirTool, workspacePath } from "./tools.ts";
 import { searchCode } from "./index.ts";
 import { fetchWebPage, searchWeb } from "./web.ts";
+import { createApproval, isAlwaysApproved } from "./approvals.ts";
+import { formatExecResult, getHostByName, sftpReadFile, sftpUploadFile, sshDeploy, sshExec, sshHomeDir, sshStatus, truncate } from "./hosts.ts";
 import { getSubagent, listSubagents, spawnSubagent, statusOf, waitForSubagent } from "./subagents.ts";
 
 // ===== Types =====
@@ -65,7 +68,8 @@ The workspace is limited to the directory provided.
 The codebase is indexed: use search_code to find symbols or files before reading them.
 This is a continuing conversation: use prior context to answer follow-up tasks.
 For parallel subtasks, spawn background subagents with spawn_subagent, poll their status with check_subagent (periodically), or block for a result with wait_subagent. Use list_subagents to see active subagents.
-You can also access the web: use web_search to find information and web_fetch to read a specific page (returned as markdown text).`;
+You can also access the web: use web_search to find information and web_fetch to read a specific page (returned as markdown text).
+You can manage remote servers: remote_status checks a configured host, remote_exec runs commands over SSH, remote_upload/remote_fetch transfer files via SFTP, and deploy ships the workspace to a host. Remote operations that change state require user approval.`;
 
 // ===== Tool definitions =====
 const TOOLS = [
@@ -223,6 +227,83 @@ const TOOLS = [
         required: ["url"]
       }
     }
+  },
+  {
+    type: "function",
+    function: {
+      name: "remote_exec",
+      description: "Run a shell command on a configured remote host over SSH. Requires user approval in the UI.",
+      parameters: {
+        type: "object",
+        properties: {
+          host: { type: "string", description: "The name of a configured host (see /api/hosts)." },
+          command: { type: "string", description: "The shell command to run on the remote host." }
+        },
+        required: ["host", "command"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "remote_status",
+      description: "Check the status (hostname, uptime, disk, memory) of a configured remote host.",
+      parameters: {
+        type: "object",
+        properties: {
+          host: { type: "string", description: "The name of a configured host." }
+        },
+        required: ["host"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "remote_upload",
+      description: "Upload a local file (relative to the workspace) to a remote host over SFTP. Requires user approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          host: { type: "string", description: "The name of a configured host." },
+          local_path: { type: "string", description: "Local file path (relative to the workspace)." },
+          remote_path: { type: "string", description: "Destination path on the remote host." }
+        },
+        required: ["host", "local_path", "remote_path"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "remote_fetch",
+      description: "Read a file from a remote host over SFTP. Requires user approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          host: { type: "string", description: "The name of a configured host." },
+          remote_path: { type: "string", description: "Path of the remote file to read." }
+        },
+        required: ["host", "remote_path"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "deploy",
+      description: "Deploy the current workspace (or project) to a remote host over SFTP, optionally running a post-deploy command. Requires user approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          host: { type: "string", description: "The name of a configured host." },
+          project: { type: "string", description: "Optional project name to deploy; defaults to the active project." },
+          remote_path: { type: "string", description: "Optional destination directory on the host (defaults to ~/yoke-deploy/<project>)." },
+          post_deploy: { type: "string", description: "Optional shell command to run on the host after uploading." }
+        },
+        required: ["host"]
+      }
+    }
   }
 ];
 
@@ -258,6 +339,60 @@ const TOOL_IMPLEMENTATIONS: Record<string, (args: any, workspace: string) => Pro
   list_subagents: async () => listSubagents().map(statusOf),
   web_search: async (args) => searchWeb(String(args.query ?? ""), Math.min(Math.max(Number(args.max_results) || 6, 1), 10)),
   web_fetch: async (args) => fetchWebPage(String(args.url ?? "")),
+  remote_exec: async (args, ws) => {
+    const host = getHostByName(String(args.host ?? ""));
+    if (!host) return { error: `Unknown host '${args.host}'. Configure it via /api/hosts.` };
+    const command = String(args.command ?? "").trim();
+    if (!command) return { error: "Missing 'command'." };
+    const label = `[ssh ${host.name}] ${command}`;
+    if (!isAlwaysApproved(label) && !await createApproval(label, "agent")) {
+      return { error: "Command was not approved." };
+    }
+    return truncate(formatExecResult(await sshExec(host, command)));
+  },
+  remote_status: async (args) => {
+    const host = getHostByName(String(args.host ?? ""));
+    if (!host) return { error: `Unknown host '${args.host}'. Configure it via /api/hosts.` };
+    return await sshStatus(host);
+  },
+  remote_upload: async (args, ws) => {
+    const host = getHostByName(String(args.host ?? ""));
+    if (!host) return { error: `Unknown host '${args.host}'.` };
+    const localPath = String(args.local_path ?? "").trim();
+    const remotePath = String(args.remote_path ?? "").trim();
+    if (!localPath || !remotePath) return { error: "local_path and remote_path are required." };
+    const fullLocal = resolve(ws, localPath);
+    const label = `[upload to ${host.name}] ${localPath} -> ${remotePath}`;
+    if (!isAlwaysApproved(label) && !await createApproval(label, "agent")) {
+      return { error: "Upload was not approved." };
+    }
+    const bytes = await sftpUploadFile(host, fullLocal, remotePath);
+    return `Uploaded ${bytes} bytes to ${host.name}:${remotePath}.`;
+  },
+  remote_fetch: async (args) => {
+    const host = getHostByName(String(args.host ?? ""));
+    if (!host) return { error: `Unknown host '${args.host}'.` };
+    const remotePath = String(args.remote_path ?? "").trim();
+    if (!remotePath) return { error: "Missing 'remote_path'." };
+    const label = `[fetch from ${host.name}] ${remotePath}`;
+    if (!isAlwaysApproved(label) && !await createApproval(label, "agent")) {
+      return { error: "Fetch was not approved." };
+    }
+    return truncate(await sftpReadFile(host, remotePath));
+  },
+  deploy: async (args, ws) => {
+    const host = getHostByName(String(args.host ?? ""));
+    if (!host) return { error: `Unknown host '${args.host}'.` };
+    const projectName = String(args.project ?? "").trim() || "workspace";
+    const remotePath = String(args.remote_path ?? "").trim();
+    const remoteDir = remotePath || `${(await sshHomeDir(host)).replace(/[\\/]+$/, "")}/yoke-deploy/${projectName}`;
+    const postDeploy = args.post_deploy ? String(args.post_deploy).trim() : undefined;
+    const label = `[deploy to ${host.name}] ${projectName} -> ${remoteDir}`;
+    if (!isAlwaysApproved(label) && !await createApproval(label, "agent")) {
+      return { error: "Deploy was not approved." };
+    }
+    return await sshDeploy(host, ws, remoteDir, postDeploy);
+  },
   finish: async (args) => args.answer,
 };
 

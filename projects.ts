@@ -1,5 +1,5 @@
 // projects.ts
-import { resolve } from "https://deno.land/std@0.224.0/path/mod.ts";
+import { isAbsolute, resolve } from "https://deno.land/std@0.224.0/path/mod.ts";
 import { db } from "./db.ts";
 import { getModelForUser } from "./models.ts";
 import { workspacePath } from "./tools.ts";
@@ -40,18 +40,47 @@ export function getProject(id: number): Project | null {
   return row ? rowToProject(row) : null;
 }
 
+/** Absolute paths are used as-is; relative paths resolve against the default workspace. */
+function resolveProjectPath(path: string): string {
+  return isAbsolute(path) ? resolve(path) : resolve(workspacePath, path);
+}
+
 export function createProject(name: string, path: string, model = ""): Project {
   const trimmedName = name.trim();
   if (!trimmedName) throw new Error("Project name is required.");
-  if (!path.trim()) throw new Error("Project path is required.");
+  if (!path.trim()) throw new Error("Project working directory is required.");
   if (db.prepare("SELECT id FROM projects WHERE name = ?").get(trimmedName)) {
     throw new Error(`A project named '${trimmedName}' already exists.`);
   }
-  const resolvedPath = resolve(path);
+  const resolvedPath = resolveProjectPath(path);
   const info = db.prepare(
     "INSERT INTO projects (name, path, model, created_at) VALUES (?, ?, ?, ?)",
   ).run(trimmedName, resolvedPath, model.trim(), Date.now());
   return getProject(Number(info.lastInsertRowid))!;
+}
+
+export function updateProject(
+  id: number,
+  fields: { name?: string; path?: string; model?: string },
+): Project | null {
+  const existing = getProject(id);
+  if (!existing) return null;
+
+  const name = fields.name !== undefined ? fields.name.trim() : existing.name;
+  if (!name) throw new Error("Project name cannot be empty.");
+  if (db.prepare("SELECT id FROM projects WHERE name = ? AND id != ?").get(name, id)) {
+    throw new Error(`A project named '${name}' already exists.`);
+  }
+
+  const path = fields.path !== undefined ? fields.path.trim() : existing.path;
+  if (!path) throw new Error("Project working directory cannot be empty.");
+  const resolvedPath = resolveProjectPath(path);
+
+  const model = fields.model !== undefined ? fields.model.trim() : existing.model;
+
+  db.prepare("UPDATE projects SET name = ?, path = ?, model = ? WHERE id = ?")
+    .run(name, resolvedPath, model, id);
+  return getProject(id);
 }
 
 export function deleteProject(id: number): boolean {

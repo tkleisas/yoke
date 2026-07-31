@@ -11,9 +11,13 @@ import { compactConversation, estimateTokens, getConversation, getMaxIterationsF
 import { ALLOWED_MODELS, getModelForUser, setModelForUser } from "./models.ts";
 import { spawnSubagent, listSubagents, statusOf } from "./subagents.ts";
 import { DEFAULT_MAX_ITERATIONS, DEFAULT_SUBAGENT_MAX_ITERATIONS } from "./agent.ts";
-import { createProject, deleteProject, getActiveProjectId, getEffectiveModel, getEffectiveWorkspace, getProject, listProjects, setActiveProjectId } from "./projects.ts";
+import { createProject, deleteProject, getActiveProjectId, getEffectiveModel, getEffectiveWorkspace, getProject, listProjects, setActiveProjectId, updateProject } from "./projects.ts";
 import { fetchWebPage, searchWeb } from "./web.ts";
 import { createApproval, isAlwaysApproved, listPendingApprovals, respondApproval } from "./approvals.ts";
+import {
+  createHost, deleteHost, formatExecResult, getHost, listHosts, publicHost, sftpReadFile, sftpUploadFile,
+  sshDeploy, sshExec, sshHomeDir, sshStatus, truncate, updateHost, type Host,
+} from "./hosts.ts";
 
 function errString(err: unknown): string {
   if (err instanceof Error) return err.message;
@@ -191,6 +195,26 @@ async function handleApi(request: Request): Promise<Response> {
       );
       await Deno.mkdir(project.path, { recursive: true });
       return json({ project }, 201);
+    } catch (err) {
+      return errorResponse(err);
+    }
+  }
+
+  if (path.startsWith("/api/projects/") && method === "POST") {
+    const auth = requireAuth(request);
+    if (auth instanceof Response) return auth;
+    const id = Number(path.slice("/api/projects/".length));
+    if (!Number.isInteger(id) || id <= 0) return json({ error: "Invalid project id." }, 400);
+    try {
+      const body = await readJson(request);
+      const project = updateProject(id, {
+        name: body.name !== undefined ? String(body.name) : undefined,
+        path: body.path !== undefined ? String(body.path) : undefined,
+        model: body.model !== undefined ? String(body.model) : undefined,
+      });
+      if (!project) return json({ error: "Project not found." }, 404);
+      await Deno.mkdir(project.path, { recursive: true });
+      return json({ project });
     } catch (err) {
       return errorResponse(err);
     }
@@ -418,6 +442,132 @@ async function handleApi(request: Request): Promise<Response> {
     } catch (err) {
       return errorResponse(err);
     }
+  }
+
+  if (path === "/api/hosts" && method === "GET") {
+    const auth = requireAuth(request);
+    if (auth instanceof Response) return auth;
+    return json({ hosts: listHosts().map(publicHost) });
+  }
+
+  if (path === "/api/hosts" && method === "POST") {
+    const auth = requireAuth(request);
+    if (auth instanceof Response) return auth;
+    try {
+      const body = await readJson(request);
+      const host = createHost(
+        String(body.name ?? ""),
+        String(body.host ?? ""),
+        Number(body.port) || 22,
+        String(body.user ?? ""),
+        body.auth_type === "password" ? "password" : "key",
+        String(body.key_path ?? ""),
+        String(body.password ?? ""),
+      );
+      return json({ host: publicHost(host) }, 201);
+    } catch (err) {
+      return errorResponse(err);
+    }
+  }
+
+  const hostActionMatch = path.match(/^\/api\/hosts\/(\d+)\/(status|exec|upload|fetch|deploy)$/);
+  if (hostActionMatch && method === "POST") {
+    const auth = requireAuth(request);
+    if (auth instanceof Response) return auth;
+    const hostId = Number(hostActionMatch[1]);
+    const action = hostActionMatch[2];
+    const host = getHost(hostId);
+    if (!host) return json({ error: "Host not found." }, 404);
+    try {
+      const body = await readJson(request);
+      const requester = auth.user.username;
+
+      if (action === "status") {
+        return json({ output: await sshStatus(host) });
+      }
+
+      // Everything else requires human approval from the web UI.
+      const approve = async (label: string): Promise<boolean> => {
+        if (isAlwaysApproved(label)) return true;
+        return await createApproval(label, requester);
+      };
+
+      if (action === "exec") {
+        const command = String(body.command ?? "").trim();
+        if (!command) return json({ error: "Missing 'command' field." }, 400);
+        const label = `[ssh ${host.name}] ${command}`;
+        if (!await approve(label)) return json({ error: "Command was not approved." }, 403);
+        return json({ output: truncate(formatExecResult(await sshExec(host, command))) });
+      }
+
+      if (action === "upload") {
+        const localPath = String(body.local_path ?? "").trim();
+        const remotePath = String(body.remote_path ?? "").trim();
+        if (!localPath || !remotePath) return json({ error: "local_path and remote_path are required." }, 400);
+        const fullLocal = resolve(getEffectiveWorkspace(auth.user.id), localPath);
+        const label = `[upload to ${host.name}] ${localPath} -> ${remotePath}`;
+        if (!await approve(label)) return json({ error: "Upload was not approved." }, 403);
+        const bytes = await sftpUploadFile(host, fullLocal, remotePath);
+        return json({ output: `Uploaded ${bytes} bytes to ${host.name}:${remotePath}.` });
+      }
+
+      if (action === "fetch") {
+        const remotePath = String(body.remote_path ?? "").trim();
+        if (!remotePath) return json({ error: "Missing 'remote_path' field." }, 400);
+        const label = `[fetch from ${host.name}] ${remotePath}`;
+        if (!await approve(label)) return json({ error: "Fetch was not approved." }, 403);
+        return json({ output: truncate(await sftpReadFile(host, remotePath)) });
+      }
+
+      if (action === "deploy") {
+        let project = body.project_id != null
+          ? getProject(Number(body.project_id))
+          : body.project_name
+          ? listProjects().find((p) => p.name.toLowerCase() === String(body.project_name).toLowerCase())
+          : getProject(getActiveProjectId(auth.user.id) ?? -1);
+        if (!project) return json({ error: "Project not found. Pass project_id or project_name." }, 400);
+        const remoteDir = String(body.remote_path ?? "").trim() ||
+          `${(await sshHomeDir(host)).replace(/[\\/]+$/, "")}/yoke-deploy/${project.name}`;
+        const postDeploy = body.post_deploy ? String(body.post_deploy).trim() : undefined;
+        const label = `[deploy to ${host.name}] ${project.name} -> ${remoteDir}`;
+        if (!await approve(label)) return json({ error: "Deploy was not approved." }, 403);
+        return json({ output: await sshDeploy(host, project.path, remoteDir, postDeploy) });
+      }
+    } catch (err) {
+      return errorResponse(err);
+    }
+  }
+
+  if (path.startsWith("/api/hosts/") && method === "POST") {
+    const auth = requireAuth(request);
+    if (auth instanceof Response) return auth;
+    const id = Number(path.slice("/api/hosts/".length));
+    if (!Number.isInteger(id) || id <= 0) return json({ error: "Invalid host id." }, 400);
+    try {
+      const body = await readJson(request);
+      const host = updateHost(id, {
+        name: body.name !== undefined ? String(body.name) : undefined,
+        host: body.host !== undefined ? String(body.host) : undefined,
+        port: body.port !== undefined ? Number(body.port) : undefined,
+        user: body.user !== undefined ? String(body.user) : undefined,
+        auth_type: body.auth_type !== undefined ? String(body.auth_type) : undefined,
+        key_path: body.key_path !== undefined ? String(body.key_path) : undefined,
+        password: body.password !== undefined ? String(body.password) : undefined,
+      });
+      if (!host) return json({ error: "Host not found." }, 404);
+      return json({ host: publicHost(host) });
+    } catch (err) {
+      return errorResponse(err);
+    }
+  }
+
+  if (path.startsWith("/api/hosts/") && method === "DELETE") {
+    const auth = requireAuth(request);
+    if (auth instanceof Response) return auth;
+    const id = Number(path.slice("/api/hosts/".length));
+    if (!Number.isInteger(id) || id <= 0) return json({ error: "Invalid host id." }, 400);
+    if (!deleteHost(id)) return json({ error: "Host not found." }, 404);
+    return json({ ok: true });
   }
 
   if (path === "/api/index" && method === "POST") {

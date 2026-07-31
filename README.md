@@ -83,16 +83,22 @@ database file the server uses.
 
 ## Projects
 
-Each project has its own work directory and can pin its own LLM model. When a
-project is active, agent tools, `!` shell commands, indexing, search, and the
-conversation context all operate in that project's directory; the project's
-model (if set) overrides the user's selected model.
+Each project has its own **working directory** and can pin its own LLM model.
+When a project is active, agent tools, `!` shell commands, indexing, search,
+and the conversation context all operate in that project's directory; the
+project's model (if set) overrides the user's selected model.
 
-- Create/switch/delete from the UI (header dropdown + `＋` button) or the API:
+- Create a project from the UI (header **＋** button): set the project name,
+  the **working directory** (an absolute path, or a relative path resolved
+  against the default workspace), and an optional model.
+- Change an existing project's working directory or model with the header
+  **✎** button (or `POST /api/projects/<id>`).
+- API:
   - `POST /api/projects` `{ "name": "...", "path": "...", "model": "..." }`
+  - `POST /api/projects/<id>` `{ "path": "...", "model": "..." }` — update
   - `DELETE /api/projects/<id>`
   - `POST /api/project` `{ "project_id": <id> }` — activate (omit/null = default workspace)
-- Or in the chat: `/project`, `/project <name>`, `/project create <name> <path> [model=<model>]`, `/project delete <name>`.
+- Or in the chat: `/project`, `/project <name>`, `/project create <name> <path> [model=<model>]`, `/project update <name> path=<dir> [model=<model>]`, `/project delete <name>`.
 - Each project gets its own conversation context (run `/reindex` after switching to index its files).
 
 ## API

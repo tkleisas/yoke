@@ -235,6 +235,33 @@
     }
     #utility-bar .status { color: var(--muted); font-size: 0.8rem; }
 
+    /* ---------- Project dialog ---------- */
+    dialog {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.5rem;
+      width: 420px;
+      max-width: 92vw;
+      box-shadow: var(--shadow);
+    }
+    dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
+    dialog h3 { margin-top: 0; }
+    dialog label { display: block; margin: 0.75rem 0 0.25rem; font-size: 0.85rem; color: var(--muted); }
+    dialog input {
+      width: 100%;
+      padding: 0.5rem 0.65rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg);
+      color: var(--text);
+    }
+    dialog .hint { color: var(--muted); font-size: 0.75rem; margin-top: 0.3rem; }
+    dialog .row { display: flex; gap: 0.5rem; margin-top: 1.2rem; }
+    dialog .row button { flex: 1; }
+    dialog .row button:first-child { flex: 0 0 auto; padding: 0.5rem 1rem; }
+
     /* ---------- Approval prompts ---------- */
     .approval-card {
       align-self: flex-start;
@@ -262,6 +289,42 @@
     .approval-card .always { background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 0.35rem 0.8rem; cursor: pointer; }
     .approval-card .deny { background: none; border: 1px solid var(--error-text); color: var(--error-text); border-radius: 6px; padding: 0.35rem 0.8rem; cursor: pointer; }
     .approval-card .pending-note { color: var(--muted); font-size: 0.75rem; margin-top: 0.3rem; }
+
+    /* ---------- Hosts panel ---------- */
+    #hosts-panel {
+      border-top: 1px solid var(--border);
+      background: var(--surface);
+      padding: 0.4rem 1rem;
+      flex-shrink: 0;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+    #hosts-panel .head {
+      font-weight: 600;
+      font-size: 0.85rem;
+      margin-bottom: 0.3rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .host-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.85rem;
+      padding: 0.25rem 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .host-row:last-child { border-bottom: none; }
+    .host-row .name { font-weight: 600; min-width: 110px; }
+    .host-row .addr { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .host-row .spacer { flex: 1; }
+    .host-row button { font-size: 0.75rem; padding: 0.2rem 0.5rem; }
+    .host-grid { display: flex; gap: 0.5rem; }
+    .host-grid > div { flex: 1; }
+    .auth-row { display: flex; gap: 1rem; margin: 0.3rem 0; }
+    .auth-row label { display: flex; align-items: center; gap: 0.3rem; margin: 0; color: var(--text); }
+    dialog input[type="password"] { margin-top: 0.4rem; }
 
     /* ---------- Composer ---------- */
     #composer {
@@ -345,6 +408,7 @@
     <select id="project-select" title="Project (work directory)" hidden>
       <option value="0">Default workspace</option>
     </select>
+    <button id="btn-edit-project" class="icon-btn project-btn" title="Edit project working directory" hidden>✎</button>
     <button id="btn-new-project" class="icon-btn project-btn" title="Create project" hidden>＋</button>
     <select id="model-select" title="Agent model" hidden></select>
     <button id="dark-toggle" class="icon-btn" title="Toggle dark mode">🌙</button>
@@ -353,6 +417,57 @@
   </header>
 
   <main>
+    <!-- Project dialog (create / edit working directory) -->
+    <dialog id="project-dialog">
+      <form method="dialog" id="project-form">
+        <h3 id="project-dialog-title">New project</h3>
+        <label for="proj-name">Project name</label>
+        <input id="proj-name" type="text" autocomplete="off">
+        <label for="proj-path">Working directory</label>
+        <input id="proj-path" type="text" placeholder="e.g. C:\work\myproject or myproject" autocomplete="off">
+        <div class="hint">Absolute path, or relative to the default workspace (<span id="proj-path-hint"></span>)</div>
+        <label for="proj-model">Model (optional)</label>
+        <input id="proj-model" type="text" placeholder="e.g. deepseek-chat — blank uses your user model" autocomplete="off">
+        <div class="row">
+          <button type="button" id="proj-cancel" class="icon-btn">Cancel</button>
+          <button type="button" id="proj-save" class="icon-btn">Create project</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Host dialog (create / edit) -->
+    <dialog id="host-dialog">
+      <form method="dialog" id="host-form">
+        <h3 id="host-dialog-title">Add host</h3>
+        <label for="host-name">Host name</label>
+        <input id="host-name" type="text" autocomplete="off">
+        <div class="host-grid">
+          <div>
+            <label for="host-addr">Address</label>
+            <input id="host-addr" type="text" placeholder="e.g. 192.168.1.10 or server.example.com" autocomplete="off">
+          </div>
+          <div>
+            <label for="host-port">Port</label>
+            <input id="host-port" type="number" value="22" min="1" max="65535">
+          </div>
+        </div>
+        <label for="host-user">SSH user</label>
+        <input id="host-user" type="text" autocomplete="off">
+        <label>Authentication</label>
+        <div class="auth-row">
+          <label><input type="radio" name="host-auth" value="key" checked> SSH key</label>
+          <label><input type="radio" name="host-auth" value="password"> Password</label>
+        </div>
+        <input id="host-key" type="text" placeholder="Path to private key (e.g. C:\Users\me\.ssh\id_rsa)" autocomplete="off">
+        <input id="host-password" type="password" placeholder="SSH password" autocomplete="off" hidden>
+        <div class="hint">Passwords are stored in the database.</div>
+        <div class="row">
+          <button type="button" id="host-cancel" class="icon-btn">Cancel</button>
+          <button type="button" id="host-save" class="icon-btn">Add host</button>
+        </div>
+      </form>
+    </dialog>
+
     <!-- Auth -->
     <div id="auth-view">
       <div class="auth-card">
@@ -387,6 +502,14 @@
           <button id="btn-refresh-subagents" class="icon-btn">↻</button>
         </div>
         <div id="subagent-list"></div>
+      </div>
+
+      <div id="hosts-panel" hidden>
+        <div class="head">🖥️ Remote hosts
+          <button id="btn-refresh-hosts" class="icon-btn">↻</button>
+          <button id="btn-add-host" class="icon-btn">＋ Add host</button>
+        </div>
+        <div id="hosts-list"></div>
       </div>
 
       <div id="composer">
@@ -444,7 +567,7 @@
       document.getElementById('user-badge').hidden = !loggedIn;
       document.getElementById('btn-logout').hidden = !loggedIn;
       projectSelect.hidden = !loggedIn;
-      document.getElementById('btn-new-project').hidden = !loggedIn;
+      updateProjectButtons();
       modelSelect.hidden = !loggedIn || modelSelect.options.length < 2;
       if (loggedIn) {
         document.getElementById('user-badge').textContent = `👤 ${auth.user.username}`;
@@ -500,6 +623,8 @@
       }
     });
 
+    let lastWorkspace = '';
+
     async function refreshStatus() {
       if (!auth || !auth.token) return;
       try {
@@ -508,6 +633,7 @@
         const data = await res.json();
         if (data.models && data.model) populateModels(data.models, data.model);
         if (data.projects) populateProjects(data.projects, data.project && data.project.id);
+        if (data.workspace) lastWorkspace = data.workspace;
       } catch { /* ignore */ }
     }
 
@@ -933,7 +1059,7 @@
       ['/web <query>', 'Search the web'],
       ['/fetch <url>', 'Fetch a web page and show it as markdown'],
       ['/status', 'Show account, project, theme, and index status'],
-      ['/project [name]', 'List projects or switch by name (create/delete: /project create <name> <path> [model=...])'],
+      ['/project [name]', 'List projects or switch by name. Create/edit/delete: /project create|update|delete ...'],
       ['/theme <dark|light|toggle>', 'Switch the color theme'],
       ['/logout', 'Log out'],
       ['!<command>', 'Run a shell command (e.g. !dir, !git status)'],
@@ -1071,10 +1197,11 @@
         projectSelect.appendChild(opt);
       }
       projectSelect.value = activeProjectId ? String(activeProjectId) : '0';
-      document.getElementById('btn-new-project').hidden = !loggedIn();
+      updateProjectButtons();
     }
 
     projectSelect.addEventListener('change', async () => {
+      updateProjectButtons();
       const previous = projectSelect.dataset.prev || '0';
       projectSelect.dataset.prev = projectSelect.value;
       try {
@@ -1095,25 +1222,60 @@
 
     function loggedIn() { return !!(auth && auth.token); }
 
-    document.getElementById('btn-new-project').addEventListener('click', async () => {
-      const name = prompt('Project name:');
-      if (!name || !name.trim()) return;
-      const path = prompt('Work directory path:');
-      if (!path || !path.trim()) return;
-      const model = prompt('Model (optional, leave empty for user model):', '');
+    /* ---- Project create/edit dialog ---- */
+    const projectDialog = document.getElementById('project-dialog');
+    let editingProjectId = null;
+
+    function updateProjectButtons() {
+      document.getElementById('btn-new-project').hidden = !loggedIn();
+      const hasActiveProject = loggedIn() && projectSelect.value && projectSelect.value !== '0';
+      document.getElementById('btn-edit-project').hidden = !hasActiveProject;
+    }
+
+    function openProjectDialog(editProject) {
+      editingProjectId = editProject ? editProject.id : null;
+      document.getElementById('project-dialog-title').textContent = editProject ? `Edit project: ${editProject.name}` : 'New project';
+      document.getElementById('proj-name').value = editProject ? editProject.name : '';
+      document.getElementById('proj-path').value = editProject ? editProject.path : '';
+      document.getElementById('proj-model').value = editProject ? editProject.model : '';
+      document.getElementById('proj-save').textContent = editProject ? 'Save changes' : 'Create project';
+      document.getElementById('proj-name').disabled = !!editProject;
+      document.getElementById('proj-path-hint').textContent = lastWorkspace || 'the server default';
+      projectDialog.showModal();
+      (editProject ? document.getElementById('proj-path') : document.getElementById('proj-name')).focus();
+    }
+
+    document.getElementById('btn-new-project').addEventListener('click', () => openProjectDialog(null));
+    document.getElementById('btn-edit-project').addEventListener('click', () => {
+      const id = Number(projectSelect.value);
+      const current = projectsCache.find((p) => p.id === id);
+      if (current) openProjectDialog(current);
+    });
+    document.getElementById('proj-cancel').addEventListener('click', () => projectDialog.close());
+
+    document.getElementById('proj-save').addEventListener('click', async () => {
+      const name = document.getElementById('proj-name').value.trim();
+      const path = document.getElementById('proj-path').value.trim();
+      const model = document.getElementById('proj-model').value.trim();
+      if (!name) { alert('Project name is required.'); return; }
+      if (!path) { alert('Working directory is required.'); return; }
       try {
-        const res = await fetch('/api/projects', {
+        const url = editingProjectId ? `/api/projects/${editingProjectId}` : '/api/projects';
+        const res = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...authHeaders() },
-          body: JSON.stringify({ name: name.trim(), path: path.trim(), model: (model || '').trim() }),
+          body: JSON.stringify({ name, path, model }),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-        addSystemMessage(`Project '${data.project.name}' created at ${data.project.path}.`);
+        projectDialog.close();
+        addSystemMessage(editingProjectId
+          ? `Project '${data.project.name}' updated — working directory: ${data.project.path}${data.project.model ? `, model ${data.project.model}` : ''}.`
+          : `Project '${data.project.name}' created — working directory: ${data.project.path}.`);
         await refreshStatus();
         await refreshSubagents();
       } catch (err) {
-        addError(`Failed to create project: ${err.message}`);
+        alert(`Failed: ${err.message}`);
       }
     });
 
@@ -1147,6 +1309,45 @@
             await refreshStatus();
           } catch (err) {
             addError(`Failed to create project: ${err.message}`);
+          }
+        })();
+        return;
+      }
+      if (sub === 'update') {
+        const rest = parts.slice(1);
+        const name = rest[0];
+        let model;
+        let path;
+        const others = [];
+        for (const tok of rest.slice(1)) {
+          if (tok.startsWith('model=')) model = tok.slice(6);
+          else if (tok.startsWith('path=')) path = tok.slice(5);
+          else others.push(tok);
+        }
+        if (path === undefined && others.length > 0) path = others.join(' ');
+        if (!name || (path === undefined && model === undefined)) {
+          addError('Usage: /project update <name> path=<dir> [model=<model>]');
+          return;
+        }
+        (async () => {
+          try {
+            const projects = await fetch('/api/projects', { headers: authHeaders() }).then((r) => r.json());
+            const target = (projects.projects || []).find((p) => p.name.toLowerCase() === name.toLowerCase());
+            if (!target) { addError(`No project named '${name}'.`); return; }
+            const body = {};
+            if (path !== undefined) body.path = path;
+            if (model !== undefined) body.model = model;
+            const res = await fetch(`/api/projects/${target.id}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', ...authHeaders() },
+              body: JSON.stringify(body),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+            addSystemMessage(`Project '${data.project.name}' updated — working directory: ${data.project.path}${data.project.model ? `, model ${data.project.model}` : ''}.`);
+            await refreshStatus();
+          } catch (err) {
+            addError(`Failed to update project: ${err.message}`);
           }
         })();
         return;
@@ -1203,6 +1404,159 @@
           addError(`Failed to switch project: ${err.message}`);
         }
       })();
+    }
+
+    /* ---------- Hosts ---------- */
+    const hostDialog = document.getElementById('host-dialog');
+    let editingHostId = null;
+    let hostsCache = [];
+
+    async function refreshHosts() {
+      if (!auth || !auth.token) return;
+      try {
+        const res = await fetch('/api/hosts', { headers: authHeaders() });
+        if (!res.ok) return;
+        const data = await res.json();
+        hostsCache = data.hosts || [];
+        renderHosts(hostsCache);
+      } catch { /* ignore */ }
+    }
+
+    function renderHosts(hosts) {
+      const panel = document.getElementById('hosts-panel');
+      const list = document.getElementById('hosts-list');
+      if (!hosts || hosts.length === 0) {
+        panel.hidden = true;
+        return;
+      }
+      panel.hidden = false;
+      list.innerHTML = '';
+      for (const h of hosts) {
+        const row = document.createElement('div');
+        row.className = 'host-row';
+        const name = document.createElement('span');
+        name.className = 'name';
+        name.textContent = h.name;
+        const addr = document.createElement('span');
+        addr.className = 'addr';
+        addr.textContent = `${h.user}@${h.host}:${h.port} (${h.auth_type})`;
+        const spacer = document.createElement('span');
+        spacer.className = 'spacer';
+        const statusBtn = document.createElement('button');
+        statusBtn.className = 'icon-btn';
+        statusBtn.textContent = '⚡ status';
+        const editBtn = document.createElement('button');
+        editBtn.className = 'icon-btn';
+        editBtn.textContent = '✎';
+        const delBtn = document.createElement('button');
+        delBtn.className = 'icon-btn';
+        delBtn.textContent = '🗑';
+        row.appendChild(name);
+        row.appendChild(addr);
+        row.appendChild(spacer);
+        row.appendChild(statusBtn);
+        row.appendChild(editBtn);
+        row.appendChild(delBtn);
+        list.appendChild(row);
+
+        statusBtn.addEventListener('click', async () => {
+          addSystemMessage(`🖥️ Checking ${h.name}...`);
+          try {
+            const res = await fetch(`/api/hosts/${h.id}/status`, { method: 'POST', headers: authHeaders(), body: '{}' });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+            addAssistant(data.output.replace(/```/g, '``\u200b`'));
+          } catch (err) {
+            addError(`Status failed: ${err.message}`);
+          }
+        });
+        editBtn.addEventListener('click', () => openHostDialog(h));
+        delBtn.addEventListener('click', async () => {
+          if (!confirm(`Delete host '${h.name}'?`)) return;
+          try {
+            const res = await fetch(`/api/hosts/${h.id}`, { method: 'DELETE', headers: authHeaders() });
+            if (!res.ok) {
+              const data = await res.json().catch(() => ({}));
+              throw new Error(data.error || `HTTP ${res.status}`);
+            }
+            addSystemMessage(`Host '${h.name}' deleted.`);
+            await refreshHosts();
+          } catch (err) {
+            addError(`Delete failed: ${err.message}`);
+          }
+        });
+      }
+    }
+
+    document.getElementById('btn-refresh-hosts').addEventListener('click', refreshHosts);
+    document.getElementById('btn-add-host').addEventListener('click', () => openHostDialog(null));
+
+    function openHostDialog(host) {
+      editingHostId = host ? host.id : null;
+      document.getElementById('host-dialog-title').textContent = host ? `Edit host: ${host.name}` : 'Add host';
+      document.getElementById('host-name').value = host ? host.name : '';
+      document.getElementById('host-addr').value = host ? host.host : '';
+      document.getElementById('host-port').value = host ? host.port : 22;
+      document.getElementById('host-user').value = host ? host.user : '';
+      const authType = host ? host.auth_type : 'key';
+      document.querySelector('input[name="host-auth"][value="key"]').checked = authType !== 'password';
+      document.querySelector('input[name="host-auth"][value="password"]').checked = authType === 'password';
+      document.getElementById('host-key').value = host ? host.key_path : '';
+      document.getElementById('host-password').value = '';
+      document.getElementById('host-save').textContent = host ? 'Save changes' : 'Add host';
+      document.getElementById('host-name').disabled = !!host;
+      syncHostAuthFields();
+      hostDialog.showModal();
+    }
+
+    function syncHostAuthFields() {
+      const useKey = document.querySelector('input[name="host-auth"]:checked').value === 'key';
+      document.getElementById('host-key').hidden = !useKey;
+      document.getElementById('host-password').hidden = useKey;
+    }
+
+    document.querySelectorAll('input[name="host-auth"]').forEach((r) => r.addEventListener('change', syncHostAuthFields));
+    document.getElementById('host-cancel').addEventListener('click', () => hostDialog.close());
+
+    document.getElementById('host-save').addEventListener('click', async () => {
+      const name = document.getElementById('host-name').value.trim();
+      const host = document.getElementById('host-addr').value.trim();
+      const port = parseInt(document.getElementById('host-port').value, 10) || 22;
+      const user = document.getElementById('host-user').value.trim();
+      const authType = document.querySelector('input[name="host-auth"]:checked').value;
+      const keyPath = document.getElementById('host-key').value.trim();
+      const password = document.getElementById('host-password').value;
+      if (!name || !host || !user) { alert('Name, address, and user are required.'); return; }
+      try {
+        const url = editingHostId ? `/api/hosts/${editingHostId}` : '/api/hosts';
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({ name, host, port, user, auth_type: authType, key_path: keyPath, password }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        hostDialog.close();
+        addSystemMessage(`Host '${data.host.name}' ${editingHostId ? 'updated' : 'added'} (${data.host.user}@${data.host.host}:${data.host.port}).`);
+        await refreshHosts();
+      } catch (err) {
+        alert(`Failed: ${err.message}`);
+      }
+    });
+
+    async function remoteAction(action, hostId, body, doneText) {
+      try {
+        const res = await fetch(`/api/hosts/${hostId}/${action}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        addAssistant((data.output || doneText || '').replace(/```/g, '``\u200b`'));
+      } catch (err) {
+        addError(`${action} failed: ${err.message}`);
+      }
     }
 
     /* ---------- Model selection ---------- */

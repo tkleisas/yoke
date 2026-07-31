@@ -29,6 +29,18 @@ db.exec(`
     created_at INTEGER NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS hosts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    host TEXT NOT NULL,
+    port INTEGER NOT NULL DEFAULT 22,
+    user TEXT NOT NULL,
+    auth_type TEXT NOT NULL DEFAULT 'key',
+    key_path TEXT NOT NULL DEFAULT '',
+    password TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS indexed_files (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     path TEXT NOT NULL UNIQUE,
