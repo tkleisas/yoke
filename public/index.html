@@ -1,0 +1,1422 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Yoke · Agent Harness</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --surface: #f4f4f6;
+      --surface-2: #e9e9ee;
+      --text: #1a1a1a;
+      --muted: #6b7280;
+      --border: #e2e2e6;
+      --accent: #2563eb;
+      --accent-soft: #dbeafe;
+      --user-bubble: #2563eb;
+      --user-text: #ffffff;
+      --assistant-bubble: #f1f5f9;
+      --tool-bg: #f7f7f9;
+      --error-bg: #fde8e8;
+      --error-text: #b91c1c;
+      --code-bg: #1e1e2e;
+      --code-text: #d4d4e8;
+      --shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+    html[data-theme="dark"] {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --surface-2: #232735;
+      --text: #e5e7eb;
+      --muted: #9ca3af;
+      --border: #2a2d3a;
+      --accent: #60a5fa;
+      --accent-soft: #17243a;
+      --user-bubble: #3b82f6;
+      --user-text: #ffffff;
+      --assistant-bubble: #1f2430;
+      --tool-bg: #161922;
+      --error-bg: #3a1d1d;
+      --error-text: #fca5a5;
+      --code-bg: #0d0f16;
+      --code-text: #c9d1e8;
+      --shadow: 0 2px 8px rgba(0,0,0,0.4);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      transition: background 0.2s, color 0.2s;
+    }
+
+    /* ---------- Header ---------- */
+    header {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.6rem 1rem;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    header .title { font-size: 1.1rem; font-weight: 700; margin: 0; }
+    header .spacer { flex: 1; }
+    header .user-badge {
+      font-size: 0.9rem;
+      color: var(--muted);
+      background: var(--surface-2);
+      padding: 0.3rem 0.6rem;
+      border-radius: 999px;
+    }
+    header select {
+      background: var(--surface-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.3rem 0.5rem;
+      font-size: 0.85rem;
+      max-width: 220px;
+    }
+    header .project-btn { font-size: 0.8rem; padding: 0.3rem 0.5rem; }
+    .icon-btn {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 0.35rem 0.7rem;
+      cursor: pointer;
+      font-size: 0.9rem;
+    }
+    .icon-btn:hover { background: var(--surface-2); }
+
+    /* ---------- Main ---------- */
+    main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+    /* ---------- Auth view ---------- */
+    #auth-view {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    #auth-view[hidden] { display: none; }
+    .auth-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2rem;
+      width: 340px;
+      box-shadow: var(--shadow);
+    }
+    .auth-card h2 { margin-top: 0; }
+    .auth-card label { display: block; margin: 0.75rem 0 0.25rem; font-size: 0.85rem; color: var(--muted); }
+    .auth-card input {
+      width: 100%;
+      padding: 0.55rem 0.7rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .auth-card .row { display: flex; gap: 0.5rem; margin-top: 1rem; }
+    .auth-card .row button { flex: 1; }
+    .auth-error { margin-top: 0.75rem; }
+
+    /* ---------- App view ---------- */
+    #app-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+    #app-view[hidden] { display: none; }
+
+    /* Conversation */
+    #conversation {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+    .msg {
+      max-width: min(780px, 92%);
+      border-radius: 12px;
+      padding: 0.6rem 0.9rem;
+      line-height: 1.5;
+      word-wrap: break-word;
+      overflow-wrap: anywhere;
+    }
+    .msg.user {
+      align-self: flex-end;
+      background: var(--user-bubble);
+      color: var(--user-text);
+    }
+    .msg.assistant {
+      align-self: flex-start;
+      background: var(--assistant-bubble);
+      border: 1px solid var(--border);
+    }
+    .msg.assistant h1, .msg.assistant h2, .msg.assistant h3 { margin-top: 0.4em; }
+    .msg.assistant pre {
+      background: var(--code-bg);
+      color: var(--code-text);
+      padding: 0.6rem;
+      border-radius: 8px;
+      overflow-x: auto;
+    }
+    .msg.assistant code { background: var(--code-bg); color: var(--code-text); padding: 0.1rem 0.3rem; border-radius: 4px; font-size: 0.85em; }
+    .msg.assistant pre code { background: none; padding: 0; }
+    .msg.assistant a { color: var(--accent); }
+    .msg.assistant blockquote { border-left: 3px solid var(--border); margin: 0.4em 0; padding-left: 0.7em; color: var(--muted); }
+    .msg.assistant table { border-collapse: collapse; }
+    .msg.assistant th, .msg.assistant td { border: 1px solid var(--border); padding: 0.3rem 0.6rem; }
+    .msg.assistant img { max-width: 100%; border-radius: 6px; }
+
+    .msg.system { align-self: center; color: var(--muted); font-size: 0.85rem; }
+
+    .tool-call {
+      align-self: flex-start;
+      max-width: min(780px, 92%);
+      width: 100%;
+      background: var(--tool-bg);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--accent);
+      border-radius: 8px;
+      padding: 0.5rem 0.7rem;
+      font-size: 0.85rem;
+    }
+    .tool-call .title { font-weight: 600; margin-bottom: 0.3rem; }
+    .tool-call .args, .tool-call .result {
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      white-space: pre-wrap;
+      word-break: break-all;
+      background: var(--surface-2);
+      border-radius: 6px;
+      padding: 0.35rem 0.5rem;
+      margin-top: 0.3rem;
+    }
+    .tool-call .error { color: var(--error-text); margin-top: 0.3rem; font-weight: 500; }
+    .tool-call .result.good { color: var(--text); }
+    .tool-call .result .mark { font-weight: 700; }
+
+    .msg.error {
+      align-self: flex-start;
+      background: var(--error-bg);
+      color: var(--error-text);
+      border: 1px solid var(--error-text);
+    }
+
+    /* ---------- Utility bar (index/search) ---------- */
+    #utility-bar {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+      padding: 0.4rem 1rem;
+      border-top: 1px solid var(--border);
+      background: var(--surface);
+      flex-shrink: 0;
+      flex-wrap: wrap;
+    }
+    #utility-bar input[type="text"] {
+      flex: 1;
+      min-width: 160px;
+      padding: 0.4rem 0.6rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg);
+      color: var(--text);
+    }
+    #utility-bar .status { color: var(--muted); font-size: 0.8rem; }
+
+    /* ---------- Approval prompts ---------- */
+    .approval-card {
+      align-self: flex-start;
+      max-width: min(780px, 92%);
+      width: 100%;
+      background: var(--accent-soft);
+      border: 1px solid var(--accent);
+      border-radius: 10px;
+      padding: 0.6rem 0.8rem;
+      font-size: 0.9rem;
+    }
+    .approval-card .head { font-weight: 700; margin-bottom: 0.3rem; }
+    .approval-card .cmd {
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      background: var(--code-bg);
+      color: var(--code-text);
+      border-radius: 6px;
+      padding: 0.35rem 0.5rem;
+      word-break: break-all;
+      margin-bottom: 0.5rem;
+    }
+    .approval-card .buttons { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+    .approval-card button { font-size: 0.8rem; }
+    .approval-card .approve { background: #28a745; color: #fff; border: none; border-radius: 6px; padding: 0.35rem 0.8rem; cursor: pointer; }
+    .approval-card .always { background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 0.35rem 0.8rem; cursor: pointer; }
+    .approval-card .deny { background: none; border: 1px solid var(--error-text); color: var(--error-text); border-radius: 6px; padding: 0.35rem 0.8rem; cursor: pointer; }
+    .approval-card .pending-note { color: var(--muted); font-size: 0.75rem; margin-top: 0.3rem; }
+
+    /* ---------- Composer ---------- */
+    #composer {
+      display: flex;
+      gap: 0.5rem;
+      align-items: flex-end;
+      padding: 0.75rem 1rem;
+      border-top: 1px solid var(--border);
+      background: var(--surface);
+      flex-shrink: 0;
+    }
+
+    /* ---------- Subagents ---------- */
+    #subagent-panel {
+      border-top: 1px solid var(--border);
+      background: var(--surface);
+      padding: 0.4rem 1rem;
+      flex-shrink: 0;
+      max-height: 180px;
+      overflow-y: auto;
+    }
+    #subagent-panel .head {
+      font-weight: 600;
+      font-size: 0.85rem;
+      margin-bottom: 0.3rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    #subagent-panel .head .count { color: var(--muted); font-weight: 400; }
+    .subagent {
+      font-size: 0.8rem;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      white-space: pre-wrap;
+      word-break: break-all;
+      padding: 0.25rem 0.4rem;
+      border-radius: 6px;
+      margin-bottom: 0.2rem;
+    }
+    .subagent.running { border-left: 3px solid var(--accent); background: var(--tool-bg); }
+    .subagent.done { border-left: 3px solid #28a745; background: var(--tool-bg); }
+    .subagent.error { border-left: 3px solid var(--error-text); background: var(--error-bg); color: var(--error-text); }
+    #composer textarea {
+      flex: 1;
+      resize: none;
+      min-height: 44px;
+      max-height: 160px;
+      padding: 0.6rem 0.7rem;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: inherit;
+    }
+    #composer textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+    .send-btn {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      padding: 0.6rem 1.1rem;
+      font-size: 1rem;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    .send-btn:hover { filter: brightness(1.1); }
+    .send-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+    .composer-actions { display: flex; flex-direction: column; gap: 0.35rem; }
+    .composer-actions .icon-btn { font-size: 0.8rem; }
+
+    @media (max-width: 600px) {
+      .msg, .tool-call { max-width: 100%; }
+      header { flex-wrap: wrap; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1 class="title"><span>🪢</span> Yoke</h1>
+    <span class="spacer"></span>
+    <select id="project-select" title="Project (work directory)" hidden>
+      <option value="0">Default workspace</option>
+    </select>
+    <button id="btn-new-project" class="icon-btn project-btn" title="Create project" hidden>＋</button>
+    <select id="model-select" title="Agent model" hidden></select>
+    <button id="dark-toggle" class="icon-btn" title="Toggle dark mode">🌙</button>
+    <span id="user-badge" class="user-badge" hidden></span>
+    <button id="btn-logout" class="icon-btn" hidden>Log out</button>
+  </header>
+
+  <main>
+    <!-- Auth -->
+    <div id="auth-view">
+      <div class="auth-card">
+        <h2>Welcome to Yoke</h2>
+        <p style="color:var(--muted);font-size:0.9rem;margin-top:0;">Log in to use the agent. Accounts are created by the server administrator.</p>
+        <label for="auth-username">Username</label>
+        <input id="auth-username" type="text" autocomplete="username">
+        <label for="auth-password">Password</label>
+        <input id="auth-password" type="password" placeholder="Password" autocomplete="current-password">
+        <div class="row">
+          <button id="btn-login" class="icon-btn">Log in</button>
+        </div>
+        <div id="auth-error" class="msg error auth-error" hidden></div>
+      </div>
+    </div>
+
+    <!-- App -->
+    <div id="app-view" hidden>
+      <div id="conversation">
+        <div class="msg system">Your conversation appears here. Ask the agent to do something in the workspace, or type <b>/help</b> for commands.</div>
+      </div>
+
+      <div id="utility-bar">
+        <button id="btn-reindex" class="icon-btn">↻ Reindex workspace</button>
+        <span id="index-status" class="status"></span>
+        <input id="search-input" type="text" placeholder="Search symbols / files...">
+        <button id="btn-search" class="icon-btn">Search</button>
+      </div>
+
+      <div id="subagent-panel" hidden>
+        <div class="head">🛠️ Subagents <span class="count" id="subagent-count"></span>
+          <button id="btn-refresh-subagents" class="icon-btn">↻</button>
+        </div>
+        <div id="subagent-list"></div>
+      </div>
+
+      <div id="composer">
+        <textarea id="task" rows="2" placeholder="Ask Yoke to do something, or type /help for commands..."></textarea>
+        <div class="composer-actions">
+          <button id="run" class="send-btn">▶ Send</button>
+          <button id="clear" class="icon-btn">Clear</button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const AUTH_KEY = 'yoke_session';
+    const THEME_KEY = 'yoke_theme';
+    const conversation = document.getElementById('conversation');
+    const taskInput = document.getElementById('task');
+    const runBtn = document.getElementById('run');
+    const clearBtn = document.getElementById('clear');
+
+    let auth = JSON.parse(localStorage.getItem(AUTH_KEY) || 'null');
+    let running = false;
+
+    marked.setOptions({ gfm: true, breaks: true });
+
+    function renderMarkdown(text) {
+      return DOMPurify.sanitize(marked.parse(text || ''));
+    }
+
+    /* ---------- Theme ---------- */
+    function applyTheme(theme) {
+      document.documentElement.dataset.theme = theme;
+      document.getElementById('dark-toggle').textContent = theme === 'dark' ? '☀️' : '🌙';
+    }
+    document.getElementById('dark-toggle').addEventListener('click', () => {
+      const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+      localStorage.setItem(THEME_KEY, next);
+      applyTheme(next);
+    });
+    (() => {
+      const saved = localStorage.getItem(THEME_KEY);
+      const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      applyTheme(saved || (prefersDark ? 'dark' : 'light'));
+    })();
+
+    /* ---------- Auth ---------- */
+    function authHeaders() {
+      return auth && auth.token ? { 'Authorization': `Bearer ${auth.token}` } : {};
+    }
+
+    function renderAuth() {
+      const loggedIn = !!(auth && auth.token);
+      document.getElementById('auth-view').hidden = loggedIn;
+      document.getElementById('app-view').hidden = !loggedIn;
+      document.getElementById('user-badge').hidden = !loggedIn;
+      document.getElementById('btn-logout').hidden = !loggedIn;
+      projectSelect.hidden = !loggedIn;
+      document.getElementById('btn-new-project').hidden = !loggedIn;
+      modelSelect.hidden = !loggedIn || modelSelect.options.length < 2;
+      if (loggedIn) {
+        document.getElementById('user-badge').textContent = `👤 ${auth.user.username}`;
+      }
+    }
+
+    function saveAuth(session) {
+      auth = session;
+      localStorage.setItem(AUTH_KEY, JSON.stringify(session));
+      renderAuth();
+    }
+
+    function clearAuth() {
+      auth = null;
+      localStorage.removeItem(AUTH_KEY);
+      renderAuth();
+    }
+
+    function showAuthError(message) {
+      const el = document.getElementById('auth-error');
+      el.textContent = message;
+      el.hidden = false;
+    }
+
+    async function authRequest(path, body) {
+      const res = await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      return data;
+    }
+
+    document.getElementById('btn-login').addEventListener('click', async () => {
+      const username = document.getElementById('auth-username').value;
+      const password = document.getElementById('auth-password').value;
+      try {
+        saveAuth(await authRequest('/api/login', { username, password }));
+        await refreshStatus();
+        await refreshSubagents();
+      } catch (err) {
+        showAuthError(err.message);
+      }
+    });
+
+    document.getElementById('btn-logout').addEventListener('click', async () => {
+      try {
+        await fetch('/api/logout', { method: 'POST', headers: authHeaders() });
+      } finally {
+        clearAuth();
+      }
+    });
+
+    async function refreshStatus() {
+      if (!auth || !auth.token) return;
+      try {
+        const res = await fetch('/api/status', { headers: authHeaders() });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.models && data.model) populateModels(data.models, data.model);
+        if (data.projects) populateProjects(data.projects, data.project && data.project.id);
+      } catch { /* ignore */ }
+    }
+
+    async function verifySession() {
+      if (!auth || !auth.token) { renderAuth(); return; }
+      try {
+        const res = await fetch('/api/me', { headers: authHeaders() });
+        if (!res.ok) { clearAuth(); return; }
+        const data = await res.json();
+        auth.user = data.user;
+        localStorage.setItem(AUTH_KEY, JSON.stringify(auth));
+        renderAuth();
+        await refreshStatus();
+        await refreshSubagents();
+      } catch {
+        renderAuth();
+      }
+    }
+
+    /* ---------- Conversation ---------- */
+    function scrollToBottom() {
+      conversation.scrollTop = conversation.scrollHeight;
+    }
+
+    function addUserMessage(text) {
+      const div = document.createElement('div');
+      div.className = 'msg user';
+      div.innerHTML = renderMarkdown(text);
+      conversation.appendChild(div);
+      scrollToBottom();
+    }
+
+    function addSystemMessage(text) {
+      const div = document.createElement('div');
+      div.className = 'msg system';
+      div.textContent = text;
+      conversation.appendChild(div);
+      scrollToBottom();
+    }
+
+    function addError(text) {
+      const div = document.createElement('div');
+      div.className = 'msg error';
+      div.textContent = text;
+      conversation.appendChild(div);
+      scrollToBottom();
+    }
+
+    function addAssistant(text) {
+      const div = document.createElement('div');
+      div.className = 'msg assistant';
+      div.innerHTML = renderMarkdown(text);
+      conversation.appendChild(div);
+      scrollToBottom();
+    }
+
+    function addToolCall(step, action, args, result, error) {
+      const div = document.createElement('div');
+      div.className = 'tool-call';
+      const title = document.createElement('div');
+      title.className = 'title';
+      title.textContent = `🛠️ Step ${step} · ${action}`;
+      div.appendChild(title);
+
+      const argsDiv = document.createElement('div');
+      argsDiv.className = 'args';
+      argsDiv.textContent = `Arguments: ${JSON.stringify(args)}`;
+      div.appendChild(argsDiv);
+
+      if (error) {
+        const errDiv = document.createElement('div');
+        errDiv.className = 'error';
+        errDiv.textContent = `❌ ${error}`;
+        div.appendChild(errDiv);
+      } else if (result !== undefined) {
+        const resultDiv = document.createElement('div');
+        resultDiv.className = 'result good';
+        const resultStr = typeof result === 'object' ? JSON.stringify(result, null, 2) : String(result);
+        resultDiv.textContent = resultStr;
+        div.appendChild(resultDiv);
+      }
+
+      conversation.appendChild(div);
+      scrollToBottom();
+    }
+
+    /* ---------- Run agent ---------- */
+    runBtn.addEventListener('click', sendTask);
+    taskInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendTask();
+      }
+    });
+
+    function setRunning(isRunning) {
+      running = isRunning;
+      runBtn.disabled = isRunning;
+      runBtn.textContent = isRunning ? '⏳ Working...' : '▶ Send';
+      taskInput.disabled = isRunning;
+    }
+
+    async function sendTask() {
+      if (running) return;
+      if (!auth || !auth.token) {
+        document.getElementById('auth-view').hidden = false;
+        document.getElementById('app-view').hidden = true;
+        return;
+      }
+      const task = taskInput.value.trim();
+      if (!task) return;
+      taskInput.value = '';
+
+      // !command runs a shell command on the server (e.g. !dir, !git status)
+      if (task.startsWith('!')) {
+        addUserMessage(task);
+        await runShell(task.slice(1).trim());
+        taskInput.focus();
+        return;
+      }
+
+      // Slash commands are handled locally (e.g. /help, /reindex, /search ...)
+      if (await handleSlashCommand(task)) {
+        taskInput.focus();
+        return;
+      }
+
+      addUserMessage(task);
+      setRunning(true);
+
+      try {
+        const response = await fetch('/api/agent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({ task }),
+        });
+
+        if (response.status === 401) {
+          clearAuth();
+          addError('Session expired. Please log in again.');
+          return;
+        }
+        if (!response.ok) {
+          const errorText = await response.text();
+          addError(`HTTP ${response.status}: ${errorText}`);
+          return;
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let assistantRendered = false;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const events = buffer.split('\n\n');
+          buffer = events.pop() || '';
+
+          for (const event of events) {
+            if (!event.trim().startsWith('data: ')) continue;
+            let parsed;
+            try {
+              parsed = JSON.parse(event.trim().slice(6));
+            } catch { continue; }
+
+            if (parsed.type === 'start') {
+              addSystemMessage('🚀 Yoke engaged...');
+            } else if (parsed.type === 'step') {
+              addToolCall(parsed.step, parsed.action, parsed.args, parsed.result, parsed.error);
+            } else if (parsed.type === 'usage') {
+              addSystemMessage(`🧾 Tokens: ${parsed.promptTokens.toLocaleString()} in / ${parsed.completionTokens.toLocaleString()} out (${parsed.totalTokens.toLocaleString()} total)`);
+            } else if (parsed.type === 'finish') {
+              addAssistant(parsed.finalAnswer);
+              assistantRendered = true;
+            } else if (parsed.type === 'error') {
+              addError(parsed.error);
+            }
+          }
+        }
+
+        if (!assistantRendered) {
+          addSystemMessage('Run finished.');
+        }
+      } catch (err) {
+        addError(`Network error: ${err.message}`);
+      } finally {
+        setRunning(false);
+        taskInput.focus();
+      }
+    }
+
+    clearBtn.addEventListener('click', () => {
+      conversation.innerHTML = '';
+      addSystemMessage('Conversation cleared.');
+    });
+
+    /* ---------- Index & search ---------- */
+    async function reindexWorkspace() {
+      const status = document.getElementById('index-status');
+      status.textContent = '⏳ Indexing...';
+      try {
+        const res = await fetch('/api/index', { method: 'POST', headers: authHeaders() });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        status.textContent = `✓ ${data.total_files} files, ${data.total_symbols} symbols (+${data.indexed} new, ${data.updated} updated)`;
+        addAssistant(`### Indexed workspace\n\n- **Files:** ${data.total_files} (${data.indexed} new, ${data.updated} updated, ${data.unchanged} unchanged)\n- **Symbols:** ${data.total_symbols}`);
+      } catch (err) {
+        status.textContent = '';
+        addError(`Indexing failed: ${err.message}`);
+      }
+    }
+
+    document.getElementById('btn-reindex').addEventListener('click', reindexWorkspace);
+
+    document.getElementById('btn-search').addEventListener('click', () => doSearch());
+    document.getElementById('search-input').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') doSearch();
+    });
+
+    async function doSearch(query) {
+      const q = (query !== undefined ? query : document.getElementById('search-input').value).trim();
+      if (!q) return;
+      try {
+        const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`, { headers: authHeaders() });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        let text = `### Search: \`${q}\`\n\n`;
+        if (data.symbols.length) {
+          text += `**Symbols** (${data.symbols.length}):\n`;
+          for (const s of data.symbols) {
+            text += `- \`${s.kind}\` **${s.name}** — \`${s.path}:${s.line}\`\n`;
+          }
+          text += '\n';
+        }
+        if (data.files.length) {
+          text += `**Files** (${data.files.length}):\n`;
+          for (const f of data.files) {
+            text += `- \`${f.path}\`\n`;
+          }
+        }
+        if (!data.symbols.length && !data.files.length) {
+          text += '_No matches._';
+        }
+        addAssistant(text);
+      } catch (err) {
+        addError(`Search failed: ${err.message}`);
+      }
+    }
+
+    /* ---------- Shell commands (!cmd) ---------- */
+    // Pending shell-command approvals, rendered as prompt cards in the
+    // conversation. The /api/shell request blocks until the user answers.
+    const approvalCards = {};
+    let approvalPolling = null;
+    let activeShellRequests = 0;
+
+    function respondToApproval(id, action, always) {
+      return fetch(`/api/approvals/${id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ action, always: !!always }),
+      });
+    }
+
+    function renderApprovalCard(approval) {
+      const card = document.createElement('div');
+      card.className = 'approval-card';
+      card.dataset.approvalId = approval.id;
+
+      const head = document.createElement('div');
+      head.className = 'head';
+      head.textContent = `⚠️ Permission request (from ${approval.requester})`;
+      card.appendChild(head);
+
+      const cmd = document.createElement('div');
+      cmd.className = 'cmd';
+      cmd.textContent = approval.command;
+      card.appendChild(cmd);
+
+      const note = document.createElement('div');
+      note.className = 'pending-note';
+      note.textContent = '⏳ Waiting for approval…';
+      card.appendChild(note);
+
+      const buttons = document.createElement('div');
+      buttons.className = 'buttons';
+      const approve = document.createElement('button');
+      approve.className = 'approve';
+      approve.textContent = '✅ Approve';
+      const always = document.createElement('button');
+      always.className = 'always';
+      always.textContent = '♾️ Allow always';
+      const deny = document.createElement('button');
+      deny.className = 'deny';
+      deny.textContent = '❌ Deny';
+      buttons.appendChild(approve);
+      buttons.appendChild(always);
+      buttons.appendChild(deny);
+      card.appendChild(buttons);
+
+      async function answer(action, isAlways) {
+        approve.disabled = true;
+        always.disabled = true;
+        deny.disabled = true;
+        note.textContent = action === 'deny' ? 'Denied.' : (isAlways ? 'Allowed always.' : 'Approved. Running…');
+        try {
+          const res = await respondToApproval(approval.id, action, isAlways);
+          if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            note.textContent = data.error || `HTTP ${res.status}`;
+          }
+        } catch (err) {
+          note.textContent = `Failed: ${err.message}`;
+        }
+      }
+
+      approve.addEventListener('click', () => answer('approve', false));
+      always.addEventListener('click', () => answer('approve', true));
+      deny.addEventListener('click', () => answer('deny', false));
+
+      conversation.appendChild(card);
+      scrollToBottom();
+      approvalCards[approval.id] = card;
+    }
+
+    function startApprovalPolling() {
+      if (!approvalPolling) approvalPolling = setInterval(pollApprovals, 1500);
+    }
+
+    function stopApprovalPolling() {
+      if (approvalPolling) {
+        clearInterval(approvalPolling);
+        approvalPolling = null;
+      }
+    }
+
+    async function pollApprovals() {
+      if (!auth || !auth.token) return;
+      try {
+        const res = await fetch('/api/approvals', { headers: authHeaders() });
+        if (!res.ok) return;
+        const data = await res.json();
+        const approvals = data.approvals || [];
+        const seen = new Set();
+        for (const a of approvals) {
+          seen.add(a.id);
+          if (!approvalCards[a.id]) renderApprovalCard(a);
+        }
+        for (const id of Object.keys(approvalCards)) {
+          if (!seen.has(id)) {
+            approvalCards[id].remove();
+            delete approvalCards[id];
+          }
+        }
+        if (approvals.length === 0 && activeShellRequests === 0) stopApprovalPolling();
+      } catch { /* ignore */ }
+    }
+
+    async function runShell(command) {
+      if (!command) {
+        addError('Usage: !<shell command>, e.g. !dir');
+        return;
+      }
+      addSystemMessage(`🖥️ Running: ${command}`);
+      activeShellRequests++;
+      startApprovalPolling();
+      try {
+        const res = await fetch('/api/shell', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({ command }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || `HTTP ${res.status}`);
+        }
+        addAssistant('```\n' + data.output + '\n```');
+      } catch (err) {
+        if (String(err.message).includes('not approved')) {
+          addError(`Command denied: ${err.message}`);
+        } else {
+          addError(`Shell failed: ${err.message}`);
+        }
+      } finally {
+        activeShellRequests--;
+        if (activeShellRequests <= 0) activeShellRequests = 0;
+        await pollApprovals();
+      }
+    }
+
+    /* ---------- Web ---------- */
+    async function webAction(action, arg) {
+      addSystemMessage(action === 'search' ? `🌐 Searching: ${arg}` : `🌐 Fetching: ${arg}`);
+      try {
+        const res = await fetch('/api/web', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify(action === 'search' ? { action: 'search', query: arg } : { action: 'fetch', url: arg }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        addAssistant(data.result.replace(/```/g, '``\u200b`'));
+      } catch (err) {
+        addError(`${action === 'search' ? 'Web search' : 'Web fetch'} failed: ${err.message}`);
+      }
+    }
+
+    /* ---------- Slash commands ---------- */
+    const SLASH_HELP = [
+      ['/help', 'Show this list of commands'],
+      ['/clear', 'Clear the conversation and reset agent context'],
+      ['/reset', 'Reset agent context only (keeps the transcript)'],
+      ['/compact [n]', 'Keep only the last n messages of agent context (default 8)'],
+      ['/summarize', 'Replace agent context with an LLM summary of the conversation'],
+      ['/usage', 'Show context size and token usage'],
+      ['/model [name]', 'Show models or switch the model (e.g. /model deepseek-chat)'],
+      ['/maxtries [n]', 'Show or set the max agent iterations (1-100, default 10)'],
+      ['/reindex', 'Reindex the workspace'],
+      ['/search <query>', 'Search indexed symbols and files'],
+      ['/web <query>', 'Search the web'],
+      ['/fetch <url>', 'Fetch a web page and show it as markdown'],
+      ['/status', 'Show account, project, theme, and index status'],
+      ['/project [name]', 'List projects or switch by name (create/delete: /project create <name> <path> [model=...])'],
+      ['/theme <dark|light|toggle>', 'Switch the color theme'],
+      ['/logout', 'Log out'],
+      ['!<command>', 'Run a shell command (e.g. !dir, !git status)'],
+    ];
+
+    async function summarizeContext() {
+      addSystemMessage('🧠 Summarizing conversation...');
+      try {
+        const res = await fetch('/api/summarize', { method: 'POST', headers: authHeaders() });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        addAssistant('### Conversation summary\n\n' + data.summary);
+        addSystemMessage(`Context replaced with summary (~${data.estimated_tokens} tokens).`);
+      } catch (err) {
+        addError(`Summarize failed: ${err.message}`);
+      }
+    }
+
+    async function showUsage() {
+      try {
+        const res = await fetch('/api/status', { headers: authHeaders() });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        const u = data.usage;
+        let msg = '### Usage\n\n' +
+          `- **Model:** \`${data.model}\`\n` +
+          `- **Conversation messages:** ${data.context.messages}\n` +
+          `- **Estimated context tokens:** ~${data.context.estimated_tokens.toLocaleString()}\n\n` +
+          `**API usage** (${u.runs} run${u.runs === 1 ? '' : 's'}):\n` +
+          `- **Total tokens:** ${u.total_tokens.toLocaleString()}\n` +
+          `- **Prompt:** ${u.prompt_tokens.toLocaleString()}\n` +
+          `- **Completion:** ${u.completion_tokens.toLocaleString()}`;
+        if (u.last_run) {
+          msg += `\n\n_Last run (${u.last_run.model}):_ ${u.last_run.prompt_tokens} in / ${u.last_run.completion_tokens} out`;
+        }
+        addAssistant(msg);
+      } catch (err) {
+        addError(`Usage failed: ${err.message}`);
+      }
+    }
+
+    async function compactContext(n) {
+      try {
+        const res = await fetch('/api/compact', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({ keep: n }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        addSystemMessage(`Context compacted: kept last ${data.kept} messages (~${data.estimated_tokens} tokens).`);
+      } catch (err) {
+        addError(`Compact failed: ${err.message}`);
+      }
+    }
+
+    async function resetContext() {
+      try {
+        const res = await fetch('/api/reset', { method: 'POST', headers: authHeaders() });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || `HTTP ${res.status}`);
+        }
+      } catch (err) {
+        addError(`Reset failed: ${err.message}`);
+      }
+    }
+
+    /* ---------- Subagents ---------- */
+    let subagentTimer = null;
+
+    function renderSubagents(list) {
+      const panel = document.getElementById('subagent-panel');
+      const listEl = document.getElementById('subagent-list');
+      if (!list || list.length === 0) {
+        panel.hidden = true;
+        stopSubagentPolling();
+        return;
+      }
+      panel.hidden = false;
+      const running = list.filter((s) => s.status === 'running').length;
+      document.getElementById('subagent-count').textContent = `(${list.length}, ${running} running)`;
+      listEl.innerHTML = '';
+      for (const s of list) {
+        const row = document.createElement('div');
+        row.className = `subagent ${s.status}`;
+        let text = `[${s.status}] ${s.name} (${s.id}) — ${s.task}`;
+        if (s.status === 'done' && s.result) text += `\n  ✅ ${s.result}`;
+        if (s.status === 'error') text += `\n  ❌ ${s.error}`;
+        row.textContent = text;
+        listEl.appendChild(row);
+      }
+      if (running > 0) startSubagentPolling();
+      else stopSubagentPolling();
+    }
+
+    async function refreshSubagents() {
+      if (!auth || !auth.token) return;
+      try {
+        const res = await fetch('/api/subagents', { headers: authHeaders() });
+        if (!res.ok) return;
+        const data = await res.json();
+        renderSubagents(data.subagents);
+      } catch { /* ignore */ }
+    }
+
+    function startSubagentPolling() {
+      if (!subagentTimer) subagentTimer = setInterval(refreshSubagents, 3000);
+    }
+
+    function stopSubagentPolling() {
+      if (subagentTimer) {
+        clearInterval(subagentTimer);
+        subagentTimer = null;
+      }
+    }
+
+    document.getElementById('btn-refresh-subagents').addEventListener('click', refreshSubagents);
+
+    /* ---------- Project selection ---------- */
+    const projectSelect = document.getElementById('project-select');
+    let projectsCache = [];
+
+    function populateProjects(projects, activeProjectId) {
+      projectsCache = projects || [];
+      projectSelect.innerHTML = '';
+      const def = document.createElement('option');
+      def.value = '0';
+      def.textContent = 'Default workspace';
+      projectSelect.appendChild(def);
+      for (const p of projectsCache) {
+        const opt = document.createElement('option');
+        opt.value = String(p.id);
+        opt.textContent = `${p.name}${p.model ? ' ✨' : ''} (${p.path})`;
+        projectSelect.appendChild(opt);
+      }
+      projectSelect.value = activeProjectId ? String(activeProjectId) : '0';
+      document.getElementById('btn-new-project').hidden = !loggedIn();
+    }
+
+    projectSelect.addEventListener('change', async () => {
+      const previous = projectSelect.dataset.prev || '0';
+      projectSelect.dataset.prev = projectSelect.value;
+      try {
+        const res = await fetch('/api/project', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({ project_id: projectSelect.value === '0' ? null : Number(projectSelect.value) }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        addSystemMessage(`Project switched: ${data.project ? data.project.name : 'default workspace'} — workspace: ${data.workspace}, model: ${data.model}. Run /reindex to index it.`);
+        await refreshStatus();
+      } catch (err) {
+        projectSelect.value = previous;
+        addError(`Failed to switch project: ${err.message}`);
+      }
+    });
+
+    function loggedIn() { return !!(auth && auth.token); }
+
+    document.getElementById('btn-new-project').addEventListener('click', async () => {
+      const name = prompt('Project name:');
+      if (!name || !name.trim()) return;
+      const path = prompt('Work directory path:');
+      if (!path || !path.trim()) return;
+      const model = prompt('Model (optional, leave empty for user model):', '');
+      try {
+        const res = await fetch('/api/projects', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({ name: name.trim(), path: path.trim(), model: (model || '').trim() }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        addSystemMessage(`Project '${data.project.name}' created at ${data.project.path}.`);
+        await refreshStatus();
+        await refreshSubagents();
+      } catch (err) {
+        addError(`Failed to create project: ${err.message}`);
+      }
+    });
+
+    function applyProjectCommand(arg) {
+      const parts = arg.split(/\s+/);
+      const sub = (parts[0] || '').toLowerCase();
+      if (sub === 'create') {
+        const rest = parts.slice(1);
+        const name = rest[0];
+        let model = '';
+        let pathParts = [];
+        for (const tok of rest.slice(1)) {
+          if (tok.startsWith('model=')) model = tok.slice(6);
+          else pathParts.push(tok);
+        }
+        const path = pathParts.join(' ');
+        if (!name || !path) {
+          addError('Usage: /project create <name> <path> [model=<model>]');
+          return;
+        }
+        (async () => {
+          try {
+            const res = await fetch('/api/projects', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', ...authHeaders() },
+              body: JSON.stringify({ name, path, model }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+            addSystemMessage(`Project '${data.project.name}' created at ${data.project.path}${model ? ` with model ${model}` : ''}.`);
+            await refreshStatus();
+          } catch (err) {
+            addError(`Failed to create project: ${err.message}`);
+          }
+        })();
+        return;
+      }
+      if (sub === 'delete') {
+        const name = parts.slice(1).join(' ');
+        if (!name) { addError('Usage: /project delete <name>'); return; }
+        (async () => {
+          try {
+            const projects = await fetch('/api/projects', { headers: authHeaders() }).then((r) => r.json());
+            const target = (projects.projects || []).find((p) => p.name.toLowerCase() === name.toLowerCase());
+            if (!target) { addError(`No project named '${name}'.`); return; }
+            const res = await fetch(`/api/projects/${target.id}`, { method: 'DELETE', headers: authHeaders() });
+            if (!res.ok) {
+              const data = await res.json().catch(() => ({}));
+              throw new Error(data.error || `HTTP ${res.status}`);
+            }
+            addSystemMessage(`Project '${target.name}' deleted.`);
+            await refreshStatus();
+          } catch (err) {
+            addError(`Failed to delete project: ${err.message}`);
+          }
+        })();
+        return;
+      }
+      // switch or list
+      (async () => {
+        const status = await fetch('/api/status', { headers: authHeaders() }).then((r) => r.json());
+        if (!arg) {
+          let msg = '### Projects\n\n';
+          msg += `- **Current:** ${status.project ? `\`${status.project.name}\`` : 'default workspace'}\n`;
+          msg += `- **Workspace:** \`${status.workspace}\`\n`;
+          msg += `- **Effective model:** \`${status.model}\`\n\n**Available:**\n`;
+          for (const p of status.projects || []) {
+            const cur = status.project && status.project.id === p.id ? ' (current)' : '';
+            msg += `- ${p.model ? `✨ ` : ''}\`${p.name}\` — ${p.path}${p.model ? `, model ${p.model}` : ''}${cur}\n`;
+          }
+          addAssistant(msg);
+          return;
+        }
+        const target = (status.projects || []).find((p) => p.name.toLowerCase() === arg.toLowerCase());
+        if (!target) { addError(`No project named '${arg}'. Use /project to list.`); return; }
+        try {
+          const res = await fetch('/api/project', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...authHeaders() },
+            body: JSON.stringify({ project_id: target.id }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+          addSystemMessage(`Project switched to '${data.project.name}' (model: ${data.model}). Run /reindex to index it.`);
+          await refreshStatus();
+        } catch (err) {
+          addError(`Failed to switch project: ${err.message}`);
+        }
+      })();
+    }
+
+    /* ---------- Model selection ---------- */
+    const modelSelect = document.getElementById('model-select');
+
+    function populateModels(models, current) {
+      modelSelect.innerHTML = '';
+      for (const m of models) {
+        const opt = document.createElement('option');
+        opt.value = m;
+        opt.textContent = m;
+        opt.selected = m === current;
+        modelSelect.appendChild(opt);
+      }
+      modelSelect.hidden = models.length < 2;
+      if (models.length < 2) return;
+      if (!current && models.length > 0) modelSelect.value = models[0];
+    }
+
+    modelSelect.addEventListener('change', async () => {
+      const model = modelSelect.value;
+      const previous = modelSelect.dataset.prev || model;
+      modelSelect.dataset.prev = model;
+      try {
+        const res = await fetch('/api/model', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({ model }),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || `HTTP ${res.status}`);
+        }
+        addSystemMessage(`Model set to ${model}.`);
+      } catch (err) {
+        modelSelect.value = previous;
+        addError(`Failed to set model: ${err.message}`);
+      }
+    });
+
+    function applyModelCommand(arg) {
+      if (!arg) {
+        const models = Array.from(modelSelect.options).map((o) => o.value);
+        const current = modelSelect.value;
+        let msg = '### Models\n\n';
+        for (const m of models) {
+          msg += `- ${m === current ? `**${m}** (current)` : `\`${m}\``}\n`;
+        }
+        addAssistant(msg);
+        return;
+      }
+      modelSelect.value = arg;
+      modelSelect.dispatchEvent(new Event('change'));
+    }
+
+    async function setMaxTries(n) {
+      if (n === null) {
+        try {
+          const res = await fetch('/api/status', { headers: authHeaders() });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+          addAssistant(`**Max iterations:** ${data.max_iterations}`);
+        } catch (err) {
+          addError(`Failed to read max iterations: ${err.message}`);
+        }
+        return;
+      }
+      try {
+        const res = await fetch('/api/maxtries', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({ max_iterations: n }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        addSystemMessage(`Max iterations set to ${data.max_iterations}.`);
+      } catch (err) {
+        addError(`Failed to set max iterations: ${err.message}`);
+      }
+    }
+
+    async function showStatus() {
+      try {
+        const res = await fetch('/api/status', { headers: authHeaders() });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        addAssistant(
+          '### Status\n\n' +
+          `- **User:** \`${data.user.username}\`\n` +
+          `- **Project:** ${data.project ? `\`${data.project.name}\`` : 'default workspace'}\n` +
+          `- **Workspace:** \`${data.workspace}\`\n` +
+          `- **Model:** \`${data.model}\`\n` +
+          `- **Max iterations:** ${data.max_iterations}\n` +
+          `- **Theme:** \`${document.documentElement.dataset.theme}\`\n` +
+          `- **Indexed files:** ${data.index.files}\n` +
+          `- **Indexed symbols:** ${data.index.symbols}`,
+        );
+      } catch (err) {
+        addError(`Status failed: ${err.message}`);
+      }
+    }
+
+    function applyThemeCommand(arg) {
+      const current = document.documentElement.dataset.theme;
+      let next;
+      const choice = (arg || 'toggle').toLowerCase();
+      if (choice === 'dark') next = 'dark';
+      else if (choice === 'light') next = 'light';
+      else if (choice === 'toggle' || choice === '') next = current === 'dark' ? 'light' : 'dark';
+      else { addError(`Usage: /theme <dark|light|toggle>`); return; }
+      localStorage.setItem(THEME_KEY, next);
+      applyTheme(next);
+      addSystemMessage(`Theme set to ${next}.`);
+    }
+
+    async function handleSlashCommand(raw) {
+      const text = raw.trim();
+      if (!text.startsWith('/')) return false;
+
+      addUserMessage(text);
+      const [cmd, ...rest] = text.slice(1).split(/\s+/);
+      const arg = rest.join(' ').trim();
+      const c = cmd.toLowerCase();
+
+      switch (c) {
+        case 'help': {
+          let msg = '### Available commands\n\n';
+          for (const [name, desc] of SLASH_HELP) {
+            msg += `- \`${name}\` — ${desc}\n`;
+          }
+          addAssistant(msg);
+          break;
+        }
+        case 'clear': {
+          conversation.innerHTML = '';
+          await resetContext();
+          addSystemMessage('Conversation cleared and agent context reset.');
+          break;
+        }
+        case 'reset': {
+          await resetContext();
+          addSystemMessage('Agent context reset — next task starts a fresh conversation.');
+          break;
+        }
+        case 'compact': {
+          const n = arg ? parseInt(arg, 10) : 8;
+          if (isNaN(n) || n < 1) {
+            addError('Usage: /compact [n]');
+            break;
+          }
+          await compactContext(n);
+          break;
+        }
+        case 'summarize':
+          await summarizeContext();
+          break;
+        case 'usage':
+          await showUsage();
+          break;
+        case 'model':
+          applyModelCommand(arg);
+          break;
+        case 'maxtries': {
+          const n = arg ? parseInt(arg, 10) : null;
+          if (n !== null && (isNaN(n) || n < 1 || n > 100)) {
+            addError('Usage: /maxtries <1-100>');
+            break;
+          }
+          await setMaxTries(n);
+          break;
+        }
+        case 'reindex':
+          await reindexWorkspace();
+          break;
+        case 'search':
+          if (!arg) addError('Usage: /search <query>');
+          else await doSearch(arg);
+          break;
+        case 'web':
+          if (!arg) addError('Usage: /web <query>');
+          else await webAction('search', arg);
+          break;
+        case 'fetch': {
+          if (!arg) { addError('Usage: /fetch <url>'); break; }
+          const m = arg.match(/^(https?:\/\/\S+)/i);
+          if (!m) { addError('Usage: /fetch <url> (must start with http:// or https://)'); break; }
+          await webAction('fetch', m[1]);
+          break;
+        }
+        case 'status':
+          await showStatus();
+          break;
+        case 'project':
+          applyProjectCommand(arg);
+          break;
+        case 'theme':
+          applyThemeCommand(arg);
+          break;
+        case 'logout': {
+          try {
+            await fetch('/api/logout', { method: 'POST', headers: authHeaders() });
+          } finally {
+            clearAuth();
+          }
+          break;
+        }
+        default:
+          addError(`Unknown command: /${c}. Type /help for available commands.`);
+      }
+      return true;
+    }
+
+    renderAuth();
+    verifySession();
+  </script>
+</body>
+</html>

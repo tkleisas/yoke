@@ -1,0 +1,5 @@
+# generated self-signed TLS material
+certs/
+
+# local sqlite database
+*.db
