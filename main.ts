@@ -3,7 +3,7 @@ import { serve, serveTls } from "https://deno.land/std@0.224.0/http/server.ts";
 import { resolve } from "https://deno.land/std@0.224.0/path/mod.ts";
 import { db } from "./db.ts";
 import { runAgent, summarizeConversation, SYSTEM_PROMPT, type AgentEvent, type ChatMessage, DEFAULT_MAX_ITERATIONS, MAX_MAX_ITERATIONS } from "./agent.ts";
-import { ensureWorkspace, hasRunPermission, runShellCommand, workspacePath } from "./tools.ts";
+import { ensureWorkspace, hasRunPermission, runShellCommand, SHELL_TIMEOUT_MS, workspacePath } from "./tools.ts";
 import { loadOrCreateTls } from "./certs.ts";
 import { AuthError, cleanupExpiredSessions, extractToken, getUserByToken, loginUser, logoutSession, type AuthUser } from "./auth.ts";
 import { indexWorkspace, indexStats, searchSymbols, searchFiles } from "./index.ts";
@@ -13,6 +13,7 @@ import { spawnSubagent, listSubagents, statusOf } from "./subagents.ts";
 import { createProject, deleteProject, getActiveProjectId, getEffectiveModel, getEffectiveWorkspace, getProject, listProjects, setActiveProjectId, updateProject } from "./projects.ts";
 import { fetchWebPage, searchWeb } from "./web.ts";
 import { createApproval, isAlwaysApproved, listPendingApprovals, respondApproval } from "./approvals.ts";
+import { getShellJob, listShellJobs, startShellJob, stopShellJob, type ShellJob } from "./shells.ts";
 import {
   createHost, deleteHost, formatExecResult, getHost, listHosts, publicHost, sftpReadFile, sftpUploadFile,
   sshDeploy, sshExec, sshHomeDir, sshStatus, truncate, updateHost, type Host,
@@ -59,6 +60,22 @@ function errorResponse(err: unknown): Response {
   if (err instanceof AuthError) return json({ error: err.message }, err.status);
   return json({ error: errString(err) }, 500);
 }
+
+function publicJob(job: ShellJob): Record<string, unknown> {
+  return {
+    id: job.id,
+    command: job.command,
+    requester: job.requester,
+    status: job.status,
+    output: job.output,
+    timeout_seconds: job.timeoutSeconds,
+    created_at: job.createdAt,
+    ...(job.finishedAt !== undefined ? { finished_at: job.finishedAt } : {}),
+  };
+}
+
+// Active agent runs per user, so a run can be stopped from the UI.
+const activeRuns = new Map<number, AbortController>();
 
 type Auth = { token: string; user: AuthUser };
 
@@ -349,20 +366,52 @@ async function handleApi(request: Request): Promise<Response> {
       const command = String(body.command ?? "").trim();
       if (!command) return json({ error: "Missing 'command' field" }, 400);
       const cwd = getEffectiveWorkspace(auth.user.id);
+      const timeoutSeconds = Math.min(Math.max(Number(body.timeout_seconds) || 15, 1), 3600);
+
+      // Async mode: return immediately with a job id; the job waits for
+      // approval (if needed) and runs in the background. Poll GET
+      // /api/shell/<id> for status/output.
+      if (body.async === true) {
+        const job = startShellJob(command, auth.user.username, cwd, timeoutSeconds);
+        return json({ job_id: job.id, status: job.status, timeout_seconds: timeoutSeconds });
+      }
 
       // Human-in-the-loop approval: unless this exact command was already
       // approved ("allow always"), wait for the user to approve it in the UI.
       if (!isAlwaysApproved(command)) {
         const approved = await createApproval(command, auth.user.username);
         if (!approved) {
-          return json({ error: "Command was not approved." }, 403);
+          return json({ error: "Command was not approved (denied, or the approval prompt expired)." }, 403);
         }
       }
 
-      return json({ output: await runShellCommand(command, cwd) });
+      return json({ output: await runShellCommand(command, cwd, timeoutSeconds * 1000) });
     } catch (err) {
       return errorResponse(err);
     }
+  }
+
+  if (path === "/api/shell/jobs" && method === "GET") {
+    const auth = requireAuth(request);
+    if (auth instanceof Response) return auth;
+    return json({ jobs: listShellJobs().map(publicJob) });
+  }
+
+  const shellJobMatch = path.match(/^\/api\/shell\/([^/]+)(?:\/(stop))?$/);
+  if (shellJobMatch && method === "GET" && !shellJobMatch[2]) {
+    const auth = requireAuth(request);
+    if (auth instanceof Response) return auth;
+    const job = getShellJob(shellJobMatch[1]);
+    if (!job) return json({ error: "Shell job not found." }, 404);
+    return json({ job: publicJob(job) });
+  }
+
+  if (shellJobMatch && method === "POST" && shellJobMatch[2] === "stop") {
+    const auth = requireAuth(request);
+    if (auth instanceof Response) return auth;
+    if (!getShellJob(shellJobMatch[1])) return json({ error: "Shell job not found." }, 404);
+    if (!stopShellJob(shellJobMatch[1])) return json({ error: "Job is not running." }, 409);
+    return json({ ok: true });
   }
 
   if (path === "/api/subagents" && method === "GET") {
@@ -591,6 +640,15 @@ async function handleApi(request: Request): Promise<Response> {
     });
   }
 
+  if (path === "/api/agent/stop" && method === "POST") {
+    const auth = requireAuth(request);
+    if (auth instanceof Response) return auth;
+    const controller = activeRuns.get(auth.user.id);
+    if (!controller) return json({ error: "No active run to stop." }, 404);
+    controller.abort();
+    return json({ ok: true });
+  }
+
   if (path === "/api/agent" && method === "POST") {
     const auth = requireAuth(request);
     if (auth instanceof Response) return auth;
@@ -608,6 +666,8 @@ async function handleApi(request: Request): Promise<Response> {
       const workspace = getEffectiveWorkspace(auth.user.id, projectId || null);
       const maxIterations = getMaxIterationsForUser(auth.user.id) ?? DEFAULT_MAX_ITERATIONS;
       const thinkingEffort = getThinkingEffortForUser(auth.user.id);
+      const abortController = new AbortController();
+      activeRuns.set(auth.user.id, abortController);
       const stream = new ReadableStream({
         start(controller) {
           const encoder = new TextEncoder();
@@ -626,6 +686,7 @@ async function handleApi(request: Request): Promise<Response> {
             maxIterations,
             workspace,
             thinkingEffort,
+            signal: abortController.signal,
           }).then((result) => {
             // Append only the messages produced by this run; earlier history
             // rows are never rewritten or deleted.
@@ -636,6 +697,8 @@ async function handleApi(request: Request): Promise<Response> {
             const errorEvent = JSON.stringify({ type: "error", error: errString(err) });
             controller.enqueue(encoder.encode(`data: ${errorEvent}\n\n`));
             controller.close();
+          }).finally(() => {
+            activeRuns.delete(auth.user.id);
           });
         }
       });

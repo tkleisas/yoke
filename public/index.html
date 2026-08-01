@@ -187,6 +187,16 @@
     .msg.assistant table { border-collapse: collapse; }
     .msg.assistant th, .msg.assistant td { border: 1px solid var(--border); padding: 0.3rem 0.6rem; }
     .msg.assistant img { max-width: 100%; border-radius: 6px; }
+    .msg.archived, .tool-call.archived { opacity: 0.75; }
+    .archived-tag {
+      font-size: 0.7rem;
+      color: var(--muted);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 0.05rem 0.45rem;
+      vertical-align: middle;
+      white-space: nowrap;
+    }
 
     .msg.system { align-self: center; color: var(--muted); font-size: 0.85rem; }
 
@@ -549,6 +559,13 @@
         <div id="subagent-list"></div>
       </div>
 
+      <div id="shell-panel" hidden>
+        <div class="head">🖥️ Shell jobs <span class="count" id="shell-count"></span>
+          <button id="btn-refresh-shells" class="icon-btn">↻</button>
+        </div>
+        <div id="shell-list"></div>
+      </div>
+
       <div id="hosts-panel" hidden>
         <div class="head">🖥️ Remote hosts
           <button id="btn-refresh-hosts" class="icon-btn">↻</button>
@@ -561,6 +578,7 @@
         <textarea id="task" rows="2" placeholder="Ask Yoke to do something, or type /help for commands..."></textarea>
         <span id="iteration-status" class="iteration-pill" hidden></span>
         <div class="composer-actions">
+          <button id="stop" class="icon-btn" hidden>⏹ Stop</button>
           <button id="run" class="send-btn">▶ Send</button>
           <button id="clear" class="icon-btn">Clear</button>
         </div>
@@ -577,6 +595,7 @@
     const clearBtn = document.getElementById('clear');
     const effortSelect = document.getElementById('effort-select');
     const iterationStatus = document.getElementById('iteration-status');
+    const stopBtn = document.getElementById('stop');
     const EFFORT_LABELS = { '': 'auto', low: 'low', medium: 'medium', high: 'high' };
 
     let auth = JSON.parse(localStorage.getItem(AUTH_KEY) || 'null');
@@ -670,7 +689,9 @@
         saveAuth(await authRequest('/api/login', { username, password }));
         await refreshStatus();
         await refreshSubagents();
+        await refreshShellJobs();
         await refreshHosts();
+        await restoreHistoryView();
       } catch (err) {
         showAuthError(err.message);
       }
@@ -712,7 +733,9 @@
         renderAuth();
         await refreshStatus();
         await refreshSubagents();
+        await refreshShellJobs();
         await refreshHosts();
+        await restoreHistoryView();
       } catch {
         renderAuth();
       }
@@ -760,7 +783,7 @@
       div.className = 'tool-call';
       const title = document.createElement('div');
       title.className = 'title';
-      title.textContent = `🛠️ Step ${step} · ${action}`;
+      title.textContent = step != null ? `🛠️ Step ${step} · ${action}` : `🛠️ ${action}`;
       div.appendChild(title);
 
       const argsDiv = document.createElement('div');
@@ -823,7 +846,16 @@
       runBtn.disabled = isRunning;
       runBtn.textContent = isRunning ? '⏳ Working...' : '▶ Send';
       taskInput.disabled = isRunning;
+      stopBtn.hidden = !isRunning;
+      stopBtn.disabled = false;
     }
+
+    stopBtn.addEventListener('click', async () => {
+      stopBtn.disabled = true;
+      try {
+        await fetch('/api/agent/stop', { method: 'POST', headers: authHeaders() });
+      } catch { /* server restarted etc. — the SSE stream will end */ }
+    });
 
     /* ---------- Live streaming state ---------- */
     let streamingBubble = null;   // live assistant bubble while deltas arrive
@@ -886,10 +918,11 @@
       if (!task) return;
       taskInput.value = '';
 
-      // !command runs a shell command on the server (e.g. !dir, !git status)
+      // !command runs a shell command on the server (e.g. !dir, !git status);
+      // !!command runs it in the background; timeout=seconds sets a limit.
       if (task.startsWith('!')) {
         addUserMessage(task);
-        await runShell(task.slice(1).trim());
+        await runShellOperator(task);
         taskInput.focus();
         return;
       }
@@ -902,6 +935,9 @@
 
       addUserMessage(task);
       setRunning(true);
+      // Approval cards must render while the agent waits for permission on
+      // tools like run_command and remote_exec.
+      startApprovalPolling();
 
       try {
         const response = await fetch('/api/agent', {
@@ -925,6 +961,7 @@
         const decoder = new TextDecoder();
         let buffer = '';
         let assistantRendered = false;
+        let runCancelled = false;
         maxIterations = 0;
 
         while (true) {
@@ -979,6 +1016,10 @@
                 thinkingBlock.querySelector('summary').textContent = '🧠 Thinking';
                 thinkingBlock.open = false;
               }
+            } else if (parsed.type === 'cancelled') {
+              runCancelled = true;
+              iterationStatus.hidden = true;
+              addSystemMessage('⏹ Run stopped.');
             } else if (parsed.type === 'error') {
               addError(parsed.error);
               finalizeStreaming();
@@ -989,7 +1030,7 @@
 
         iterationStatus.hidden = true;
         pendingToolCard = null;
-        if (!assistantRendered) {
+        if (!assistantRendered && !runCancelled) {
           addSystemMessage('Run finished.');
         }
       } catch (err) {
@@ -997,6 +1038,7 @@
       } finally {
         setRunning(false);
         taskInput.focus();
+        await pollApprovals();
       }
     }
 
@@ -1144,6 +1186,9 @@
     }
 
     function stopApprovalPolling() {
+      // Never stop while an agent run is active — the agent can request
+      // approval for tools (run_command, remote_exec, ...) at any step.
+      if (running || activeShellRequests > 0) return;
       if (approvalPolling) {
         clearInterval(approvalPolling);
         approvalPolling = null;
@@ -1168,23 +1213,49 @@
             delete approvalCards[id];
           }
         }
-        if (approvals.length === 0 && activeShellRequests === 0) stopApprovalPolling();
+        if (approvals.length === 0 && activeShellRequests === 0 && !running) stopApprovalPolling();
       } catch { /* ignore */ }
     }
 
-    async function runShell(command) {
+    async function runShellOperator(raw) {
+      let rest = raw.slice(1);
+      let isAsync = false;
+      if (rest.startsWith('!')) {
+        isAsync = true;
+        rest = rest.slice(1);
+      }
+      let timeoutSeconds;
+      const tm = rest.match(/^\s*timeout=(\d+)\s*/);
+      if (tm) {
+        timeoutSeconds = parseInt(tm[1], 10);
+        rest = rest.slice(tm[0].length);
+      }
+      const command = rest.trim();
       if (!command) {
-        addError('Usage: !<shell command>, e.g. !dir');
+        addError(isAsync
+          ? 'Usage: !!<command> [timeout=<seconds>]'
+          : 'Usage: !<command> [timeout=<seconds>]');
         return;
       }
+      if (timeoutSeconds !== undefined && (timeoutSeconds < 1 || timeoutSeconds > 3600)) {
+        addError('Timeout must be between 1 and 3600 seconds.');
+        return;
+      }
+      if (isAsync) await runShellAsync(command, timeoutSeconds);
+      else await runShell(command, timeoutSeconds);
+    }
+
+    async function runShell(command, timeoutSeconds) {
       addSystemMessage(`🖥️ Running: ${command}`);
       activeShellRequests++;
       startApprovalPolling();
       try {
+        const body = { command };
+        if (timeoutSeconds !== undefined) body.timeout_seconds = timeoutSeconds;
         const res = await fetch('/api/shell', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...authHeaders() },
-          body: JSON.stringify({ command }),
+          body: JSON.stringify(body),
         });
         const data = await res.json();
         if (!res.ok) {
@@ -1201,6 +1272,152 @@
         activeShellRequests--;
         if (activeShellRequests <= 0) activeShellRequests = 0;
         await pollApprovals();
+      }
+    }
+
+    async function runShellAsync(command, timeoutSeconds) {
+      addSystemMessage(`🖥️ Background: ${command}`);
+      startApprovalPolling();
+      try {
+        const body = { command, async: true };
+        if (timeoutSeconds !== undefined) body.timeout_seconds = timeoutSeconds;
+        const res = await fetch('/api/shell', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        addSystemMessage(`Job \`${data.job_id}\` started (${data.status}). Use /shell ${data.job_id} or /shells to check on it.`);
+        await refreshShellJobs();
+      } catch (err) {
+        addError(`Shell failed: ${err.message}`);
+      } finally {
+        await pollApprovals();
+      }
+    }
+
+    /* ---------- Background shell jobs ---------- */
+    let shellTimer = null;
+
+    function renderShellJobs(list) {
+      const panel = document.getElementById('shell-panel');
+      const listEl = document.getElementById('shell-list');
+      if (!list || list.length === 0) {
+        panel.hidden = true;
+        stopShellPolling();
+        return;
+      }
+      panel.hidden = false;
+      const active = list.filter((j) => j.status === 'pending' || j.status === 'running').length;
+      document.getElementById('shell-count').textContent = `(${list.length}, ${active} active)`;
+      listEl.innerHTML = '';
+      for (const j of list) {
+        const row = document.createElement('div');
+        row.className = `subagent ${j.status === 'pending' || j.status === 'running' ? 'running' : j.status === 'error' || j.status === 'denied' ? 'error' : 'done'}`;
+        const line = document.createElement('div');
+        line.textContent = `[${j.status}] ${j.id} — ${j.command}`;
+        row.appendChild(line);
+        if ((j.status === 'done' || j.status === 'stopped' || j.status === 'error') && j.output) {
+          const out = document.createElement('div');
+          out.textContent = (j.status === 'error' ? '❌ ' : '') + j.output.slice(0, 500) + (j.output.length > 500 ? '…' : '');
+          row.appendChild(out);
+        }
+        if (j.status === 'pending' || j.status === 'running') {
+          const stopBtn = document.createElement('button');
+          stopBtn.className = 'icon-btn';
+          stopBtn.textContent = '⏹';
+          stopBtn.title = 'Stop job';
+          stopBtn.addEventListener('click', () => stopShellJob(j.id));
+          row.appendChild(stopBtn);
+        }
+        listEl.appendChild(row);
+      }
+      if (active > 0) startShellPolling();
+      else stopShellPolling();
+    }
+
+    async function refreshShellJobs() {
+      if (!auth || !auth.token) return;
+      try {
+        const res = await fetch('/api/shell/jobs', { headers: authHeaders() });
+        if (!res.ok) return;
+        const data = await res.json();
+        renderShellJobs(data.jobs || []);
+      } catch { /* ignore */ }
+    }
+
+    function startShellPolling() {
+      if (!shellTimer) shellTimer = setInterval(refreshShellJobs, 2000);
+    }
+
+    function stopShellPolling() {
+      if (shellTimer) {
+        clearInterval(shellTimer);
+        shellTimer = null;
+      }
+    }
+
+    document.getElementById('btn-refresh-shells').addEventListener('click', refreshShellJobs);
+
+    async function stopShellJob(id) {
+      try {
+        const res = await fetch(`/api/shell/${encodeURIComponent(id)}/stop`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: '{}',
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        addSystemMessage(`Job ${id} stopped.`);
+        await refreshShellJobs();
+      } catch (err) {
+        addError(`Failed to stop job: ${err.message}`);
+      }
+    }
+
+    async function showShellJob(id) {
+      try {
+        const res = await fetch(`/api/shell/${encodeURIComponent(id)}`, { headers: authHeaders() });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        const j = data.job;
+        let msg = `### Shell job ${j.id}\n\n` +
+          `- **Command:** \`${j.command}\`\n` +
+          `- **Status:** \`${j.status}\`\n` +
+          `- **Timeout:** ${j.timeout_seconds}s\n` +
+          `- **Started:** ${new Date(j.created_at).toLocaleString()}\n`;
+        if (j.finished_at) msg += `- **Finished:** ${new Date(j.finished_at).toLocaleString()}\n`;
+        if (j.output) msg += `\n\`\`\`\n${j.output.slice(0, 10000)}\n\`\`\``;
+        addAssistant(msg);
+      } catch (err) {
+        addError(`Shell job failed: ${err.message}`);
+      }
+    }
+
+    async function listShellJobsCommand() {
+      try {
+        const res = await fetch('/api/shell/jobs', { headers: authHeaders() });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        const jobs = data.jobs || [];
+        await refreshShellJobs();
+        if (jobs.length === 0) {
+          addAssistant('_No shell jobs yet. Use `!!<command>` to run one in the background._');
+          return;
+        }
+        let msg = '### Shell jobs\n\n';
+        for (const j of jobs) {
+          msg += `- [\`${j.status}\`] \`${j.id}\` — ${j.command}`;
+          if (j.output && (j.status === 'done' || j.status === 'stopped' || j.status === 'error')) {
+            msg += ` — ${(j.status === 'error' ? '❌ ' : '') + j.output.slice(0, 80)}`;
+          }
+          msg += '\n';
+        }
+        msg += '\n_Use `/shell <id>` for full output._';
+        addAssistant(msg);
+      } catch (err) {
+        addError(`Shells failed: ${err.message}`);
       }
     }
 
@@ -1271,6 +1488,100 @@
       }
     }
 
+    /* ---------- Restore history into the view ---------- */
+    // On login / page reload / project switch, render the stored conversation
+    // (active + archived) so a resumed session looks like it did before.
+    function makeArchivedTag() {
+      const tag = document.createElement('span');
+      tag.className = 'archived-tag';
+      tag.textContent = '🗄️ archived';
+      return tag;
+    }
+
+    async function restoreHistoryView() {
+      if (!auth || !auth.token) return;
+      try {
+        const res = await fetch('/api/history?limit=200', { headers: authHeaders() });
+        if (!res.ok) return;
+        const data = await res.json();
+        const rows = (data.messages || []).slice().reverse(); // oldest → newest
+        const nonSystem = rows.filter((m) => m.role !== 'system');
+        if (nonSystem.length === 0) return;
+
+        // Drop any live-run state and pending approval cards from the old view.
+        conversation.innerHTML = '';
+        for (const id of Object.keys(approvalCards)) delete approvalCards[id];
+        finalizeStreaming();
+        streamingBubble = null;
+        thinkingBlock = null;
+        pendingToolCard = null;
+        iterationStatus.hidden = true;
+
+        addSystemMessage(`Restored ${nonSystem.length} message(s) from history.`);
+
+        const toolResults = new Map();
+        for (const m of rows) {
+          if (m.role === 'tool' && m.tool_call_id) toolResults.set(m.tool_call_id, m.content || '');
+        }
+
+        for (const m of rows) {
+          if (m.role === 'system') continue;
+          const archived = m.status === 'archived';
+          if (m.role === 'user') {
+            const div = document.createElement('div');
+            div.className = 'msg user' + (archived ? ' archived' : '');
+            div.innerHTML = renderMarkdown(m.content || '');
+            if (archived) div.appendChild(makeArchivedTag());
+            conversation.appendChild(div);
+          } else if (m.role === 'assistant') {
+            if (m.tool_calls && m.tool_calls.length > 0) {
+              for (const tc of m.tool_calls) {
+                let args = {};
+                try { args = JSON.parse(tc.function.arguments); } catch { /* invalid JSON */ }
+                const raw = toolResults.get(tc.id);
+                let result;
+                let error;
+                if (raw !== undefined) {
+                  if (raw.startsWith('Error: ')) error = raw.slice(7);
+                  else result = raw;
+                }
+                const card = addToolCall(null, tc.function.name, args, result, error);
+                if (archived) card.appendChild(makeArchivedTag());
+              }
+            } else if (m.content) {
+              const div = document.createElement('div');
+              div.className = 'msg assistant' + (archived ? ' archived' : '');
+              div.innerHTML = renderMarkdown(m.content);
+              if (archived) div.appendChild(makeArchivedTag());
+              conversation.appendChild(div);
+            }
+          } else if (m.role === 'tool') {
+            const div = document.createElement('div');
+            div.className = 'tool-call' + (archived ? ' archived' : '');
+            const title = document.createElement('div');
+            title.className = 'title';
+            title.textContent = '🔧 Tool result';
+            div.appendChild(title);
+            const content = m.content || '';
+            if (content.startsWith('Error: ')) {
+              const errDiv = document.createElement('div');
+              errDiv.className = 'error';
+              errDiv.textContent = '❌ ' + content.slice(7);
+              div.appendChild(errDiv);
+            } else if (content) {
+              const resultDiv = document.createElement('div');
+              resultDiv.className = 'result good';
+              resultDiv.textContent = content;
+              div.appendChild(resultDiv);
+            }
+            if (archived) div.appendChild(makeArchivedTag());
+            conversation.appendChild(div);
+          }
+        }
+        scrollToBottom();
+      } catch { /* ignore */ }
+    }
+
     /* ---------- Slash commands ---------- */
     const SLASH_HELP = [
       ['/help', 'Show this list of commands'],
@@ -1283,7 +1594,7 @@
       ['/usage', 'Show context size and token usage'],
       ['/model [name]', 'Show models or switch the model (e.g. /model deepseek-chat)'],
       ['/thinking [auto|low|medium|high]', 'Show or set the reasoning/thinking effort (auto = provider default)'],
-      ['/maxtries [n]', 'Show or set the max agent iterations (1-30000, default 10)'],
+      ['/maxtries [n]', 'Show or set the max agent iterations (1-30000, default 100)'],
       ['/reindex', 'Reindex the workspace'],
       ['/search <query>', 'Search indexed symbols and files'],
       ['/web <query>', 'Search the web'],
@@ -1292,11 +1603,15 @@
       ['/hoststatus <host>', 'Check a remote host (uptime, disk, memory)'],
       ['/ssh <host> <command>', 'Run a command on a remote host (requires approval)'],
       ['/deploy <host> [project=<name>] [remote_path=<path>] [post_deploy=<cmd>]', 'Deploy a project to a remote host (requires approval)'],
+      ['/shell <id>', 'Show a background shell job (status + output)'],
+      ['/shell stop <id>', 'Stop a running background shell job'],
+      ['/shells', 'List background shell jobs'],
       ['/status', 'Show account, project, theme, and index status'],
       ['/project [name]', 'List projects or switch by name. Create/edit/delete: /project create|update|delete ...'],
       ['/theme <dark|light|toggle>', 'Switch the color theme'],
       ['/logout', 'Log out'],
-      ['!<command>', 'Run a shell command (e.g. !dir, !git status)'],
+      ['!<command> [timeout=<seconds>]', 'Run a shell command (e.g. !dir, !git status; default 15s timeout)'],
+      ['!!<command> [timeout=<seconds>]', 'Run a shell command in the background (check with /shells or /shell <id>)'],
     ];
 
     async function summarizeContext() {
@@ -1449,6 +1764,7 @@
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
         addSystemMessage(`Project switched: ${data.project ? data.project.name : 'default workspace'} — workspace: ${data.workspace}, model: ${data.model}. Run /reindex to index it.`);
         await refreshStatus();
+        await restoreHistoryView();
       } catch (err) {
         projectSelect.value = previous;
         addError(`Failed to switch project: ${err.message}`);
@@ -1635,6 +1951,7 @@
           if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
           addSystemMessage(`Project switched to '${data.project.name}' (model: ${data.model}). Run /reindex to index it.`);
           await refreshStatus();
+          await restoreHistoryView();
         } catch (err) {
           addError(`Failed to switch project: ${err.message}`);
         }
@@ -2138,6 +2455,20 @@
           await deployCommand(hostName, rest.join(' '));
           break;
         }
+        case 'shell': {
+          const [sub, ...rest] = arg.split(/\s+/);
+          if (!sub) { addError('Usage: /shell <id> or /shell stop <id>'); break; }
+          if (sub === 'stop') {
+            if (!rest[0]) { addError('Usage: /shell stop <id>'); break; }
+            await stopShellJob(rest[0]);
+            break;
+          }
+          await showShellJob(sub);
+          break;
+        }
+        case 'shells':
+          await listShellJobsCommand();
+          break;
         case 'status':
           await showStatus();
           break;

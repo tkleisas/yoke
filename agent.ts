@@ -15,6 +15,7 @@ export type AgentEvent =
   | { type: "reasoning"; content: string }
   | { type: "usage"; promptTokens: number; completionTokens: number; totalTokens: number }
   | { type: "finish"; finalAnswer: string }
+  | { type: "cancelled" }
   | { type: "error"; error: string };
 
 export type ToolCall = {
@@ -61,7 +62,7 @@ function envInt(name: string, fallback: number, min: number, max: number): numbe
 }
 
 export const MAX_MAX_ITERATIONS = 30000;
-export const DEFAULT_MAX_ITERATIONS = envInt("MAX_ITERATIONS", 10, 1, MAX_MAX_ITERATIONS);
+export const DEFAULT_MAX_ITERATIONS = envInt("MAX_ITERATIONS", 100, 1, MAX_MAX_ITERATIONS);
 export const DEFAULT_SUBAGENT_MAX_ITERATIONS = envInt("MAX_SUBAGENT_ITERATIONS", DEFAULT_MAX_ITERATIONS, 1, MAX_MAX_ITERATIONS);
 
 export const SYSTEM_PROMPT = `You are a coding assistant that uses tools to complete tasks.
@@ -143,7 +144,8 @@ const TOOLS = [
       parameters: {
         type: "object",
         properties: {
-          command: { type: "string", description: "The shell command to run (e.g. 'git status', 'ls -la', 'deno task test')." }
+          command: { type: "string", description: "The shell command to run (e.g. 'git status', 'ls -la', 'deno task test')." },
+          timeout_seconds: { type: "number", description: "Optional timeout in seconds (default 15, max 3600)." }
         },
         required: ["command"]
       }
@@ -342,9 +344,10 @@ const TOOL_IMPLEMENTATIONS: Record<string, (args: any, workspace: string) => Pro
     }
     const label = `[local] ${command}`;
     if (!isAlwaysApproved(label) && !await createApproval(label, "agent")) {
-      return { error: "Command was not approved." };
+      return { error: "Command was not approved (denied, or the approval prompt expired)." };
     }
-    return await runShellCommand(command, ws);
+    const timeoutSeconds = clampInt(Number(args.timeout_seconds), 15, 1, 3600);
+    return await runShellCommand(command, ws, timeoutSeconds * 1000);
   },
   spawn_subagent: async (args, ws) => {
     const record = spawnSubagent(
@@ -435,6 +438,7 @@ async function callDeepSeek(
   model: string,
   thinkingEffort?: string,
   onDelta?: (type: "delta" | "reasoning", content: string) => void,
+  signal?: AbortSignal,
 ): Promise<{ toolCalls?: ToolCall[]; finishAnswer?: string; usage?: ApiUsage }> {
   if (!DEEPSEEK_API_KEY) {
     console.warn("Using mock reasoning (no DEEPSEEK_API_KEY)");
@@ -460,6 +464,7 @@ async function callDeepSeek(
         "Authorization": `Bearer ${DEEPSEEK_API_KEY}`,
       },
       body: JSON.stringify(body),
+      signal,
     });
 
     if (!response.ok) {
@@ -488,6 +493,7 @@ async function callDeepSeek(
       "Authorization": `Bearer ${DEEPSEEK_API_KEY}`,
     },
     body: JSON.stringify({ ...body, stream: true, stream_options: { include_usage: true } }),
+    signal,
   });
 
   if (!response.ok) {
@@ -683,7 +689,7 @@ export async function runAgent(
   messages: ChatMessage[],
   task: string,
   onEvent: (event: AgentEvent) => void,
-  options: { model?: string; maxIterations?: number; workspace?: string; thinkingEffort?: string } = {},
+  options: { model?: string; maxIterations?: number; workspace?: string; thinkingEffort?: string; signal?: AbortSignal } = {},
 ): Promise<{ usage: AgentUsage }> {
   const model = options.model || DEEPSEEK_MODEL;
   const maxIterations = clampInt(options.maxIterations, DEFAULT_MAX_ITERATIONS, 1, MAX_MAX_ITERATIONS);
@@ -709,6 +715,11 @@ export async function runAgent(
   while (iteration < maxIterations) {
     iteration++;
 
+    if (options.signal?.aborted) {
+      onEvent({ type: "cancelled" });
+      return { usage };
+    }
+
     let toolCalls: ToolCall[] | undefined;
     let finishAnswer: string | undefined;
 
@@ -718,6 +729,7 @@ export async function runAgent(
         model,
         options.thinkingEffort,
         (type, content) => onEvent({ type, content }),
+        options.signal,
       );
       toolCalls = response.toolCalls;
       finishAnswer = response.finishAnswer;
@@ -727,7 +739,11 @@ export async function runAgent(
         usage.totalTokens += response.usage.total_tokens;
       }
     } catch (err) {
-      onEvent({ type: "error", error: errString(err) });
+      if (options.signal?.aborted) {
+        onEvent({ type: "cancelled" });
+      } else {
+        onEvent({ type: "error", error: errString(err) });
+      }
       return { usage };
     }
 

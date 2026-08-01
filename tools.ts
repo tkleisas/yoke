@@ -75,33 +75,73 @@ export function hasRunPermission(): boolean {
   }
 }
 
-export async function runShellCommand(command: string, cwd = workspacePath): Promise<string> {
+export async function runShellCommand(
+  command: string,
+  cwd = workspacePath,
+  timeoutMs = SHELL_TIMEOUT_MS,
+  signal?: AbortSignal,
+): Promise<string> {
   const shell = IS_WINDOWS ? "cmd" : "sh";
-  const args = IS_WINDOWS ? ["/c", command] : ["-c", command];
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), SHELL_TIMEOUT_MS);
+  // Output goes to temp files: Deno's .output() waits for stdout EOF, which
+  // never arrives if a child keeps the pipe open after the shell is killed.
+  // Reading the files after the shell exits makes timeout/stop reliable.
+  const outPath = await Deno.makeTempFile({ prefix: "yoke-out-" });
+  const errPath = await Deno.makeTempFile({ prefix: "yoke-err-" });
+  const wrapped = IS_WINDOWS
+    ? `${command} > "${outPath}" 2> "${errPath}"`
+    : `${command} > '${outPath}' 2> '${errPath}'`;
+  const child = new Deno.Command(shell, {
+    args: [IS_WINDOWS ? "/c" : "-c", wrapped],
+    cwd,
+    stdout: "null",
+    stderr: "null",
+  }).spawn();
+
+  let timedOut = false;
+  const kill = () => {
+    try {
+      if (IS_WINDOWS) Deno.kill(child.pid, "SIGTERM");
+      else Deno.kill(child.pid, "SIGKILL");
+    } catch {
+      // process already gone
+    }
+  };
+  const timer = setTimeout(() => {
+    timedOut = true;
+    kill();
+  }, timeoutMs);
+  const onAbort = () => kill();
+  if (signal) {
+    if (signal.aborted) kill();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  }
+
+  let code: number | null = null;
   try {
-    const result = await new Deno.Command(shell, {
-      args,
-      cwd,
-      stdout: "piped",
-      stderr: "piped",
-      signal: controller.signal,
-    }).output();
-    const decoder = new TextDecoder();
-    let output = `${decoder.decode(result.stdout)}${decoder.decode(result.stderr)}`.trim();
-    if (output.length > MAX_SHELL_OUTPUT_CHARS) {
-      output = output.slice(0, MAX_SHELL_OUTPUT_CHARS) + "\n...[truncated]";
-    }
-    if (!output) output = `(exit code ${result.code}, no output)`;
-    else if (result.code !== 0) output = `(exit code ${result.code})\n${output}`;
-    return output;
-  } catch (err) {
-    if (err instanceof DOMException && err.name === "AbortError") {
-      return `Command timed out after ${SHELL_TIMEOUT_MS / 1000} seconds.`;
-    }
-    throw new Error(`Failed to run command: ${errString(err)}`);
+    const status = await child.status;
+    code = status.code;
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
   }
+
+  const decoder = new TextDecoder();
+  let output = `${decoder.decode(await Deno.readFile(outPath))}${decoder.decode(await Deno.readFile(errPath))}`.trim();
+  await Deno.remove(outPath).catch(() => {});
+  await Deno.remove(errPath).catch(() => {});
+  if (output.length > MAX_SHELL_OUTPUT_CHARS) {
+    output = output.slice(0, MAX_SHELL_OUTPUT_CHARS) + "\n...[truncated]";
+  }
+
+  if (signal?.aborted) {
+    return output ? `(stopped)\n${output}` : "(stopped)";
+  }
+  if (timedOut) {
+    return output
+      ? `(timed out after ${timeoutMs / 1000} seconds, exit code ${code})\n${output}`
+      : `(timed out after ${timeoutMs / 1000} seconds, exit code ${code}, no output)`;
+  }
+  if (!output) return `(exit code ${code}, no output)`;
+  if (code !== 0) return `(exit code ${code})\n${output}`;
+  return output;
 }

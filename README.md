@@ -42,7 +42,7 @@ git tag v0.1.0 && git push origin v0.1.0
 ## Features
 
 - **Agent loop** with tools: `read_file`, `write_file`, `list_directory`, `search_code`, `run_command`, `finish`.
-- **Token streaming**: the agent's reply streams into the chat as it's generated, including a collapsible **thinking** block for reasoning content. Tool calls show up instantly and update as they complete.
+- **Token streaming**: the agent's reply streams into the chat as it's generated, including a collapsible **thinking** block for reasoning content. Tool calls show up instantly and update as they complete. Runs can be **stopped** with the ⏹ button (or `POST /api/agent/stop`).
 - **Thinking effort**: per-user `reasoning_effort` selection (`auto`/`low`/`medium`/`high`) via the header dropdown, `/thinking`, or `POST /api/thinking`; `auto` sends nothing so the provider uses its default.
 - **Local shell commands**: the agent can run workspace shell commands (`run_command` tool) and you can run them directly with `!command` — each one is approved from the web UI before it runs.
 - **User accounts** (username + password) stored in SQLite. Passwords are hashed with PBKDF2-SHA256.
@@ -55,8 +55,8 @@ git tag v0.1.0 && git push origin v0.1.0
 - **Code & file indexing**: recursively scans the workspace, extracts symbols (functions, classes, etc.) per language, and keeps the index incremental (mtime + content-hash aware).
 - **Search** over indexed symbols and file paths.
 - **Web access**: the agent can search the web (`web_search`, via Bing RSS, no API key) and fetch pages as markdown (`web_fetch`). Also available from the UI as `/web <query>` and `/fetch <url>`.
-- **Shell commands** from the UI via `!command` (runs server-side in the active workspace) — each command is approved from the web UI before it runs, instead of Deno prompting on the server terminal.
-- **Slash commands** in the chat input: `/help`, `/clear`, `/reset`, `/compact`, `/summarize`, `/usage`, `/model`, `/thinking`, `/maxtries`, `/project`, `/reindex`, `/search`, `/status`, `/theme`, `/logout`.
+- **Shell commands** from the UI: `!command` runs synchronously (default 15s timeout), `!!command` runs in the **background** as a job, and `!timeout=<seconds>` / `!!timeout=<seconds>` sets a limit (1-3600s). Each command is approved from the web UI before it runs, instead of Deno prompting on the server terminal. Background jobs are listed in the Shell jobs panel and with `/shells` / `/shell <id>`; running jobs can be stopped.
+- **Slash commands** in the chat input: `/help`, `/clear`, `/reset`, `/compact`, `/summarize`, `/usage`, `/model`, `/thinking`, `/maxtries`, `/project`, `/reindex`, `/search`, `/shell`, `/shells`, `/status`, `/theme`, `/logout`.
 
 ## Environment variables
 
@@ -69,8 +69,9 @@ git tag v0.1.0 && git push origin v0.1.0
 | `WORKSPACE_DIR` | `.` | Default workspace directory (used when no project is active). Shell commands run here. |
 | `DATABASE_PATH` | `./yoke.db` | SQLite database file (users, sessions, projects, index, context, usage). |
 | `PORT` | `8080` | HTTP port. |
-| `MAX_ITERATIONS` | `10` | Default max LLM iterations per agent run (1-30000). |
+| `MAX_ITERATIONS` | `100` | Default max LLM iterations per agent run (1-30000). |
 | `MAX_SUBAGENT_ITERATIONS` | `MAX_ITERATIONS` | Default max LLM iterations for subagents. |
+| `APPROVAL_TIMEOUT_MINUTES` | `5` | How long a shell-command approval prompt stays valid. |
 | `ENABLE_HTTPS` | *(off)* | Set to `1` to serve HTTPS and auto-generate a self-signed certificate on first run. |
 | `TLS_CERT_PATH` | `./certs/cert.pem` | Path to the TLS certificate (PEM). |
 | `TLS_KEY_PATH` | `./certs/key.pem` | Path to the TLS private key (PEM). |
@@ -106,6 +107,11 @@ you can **Approve** (run once), **Allow always** (skip future prompts for that
 exact command), or **Deny**. Unanswered prompts expire after 5 minutes. Note:
 any authenticated user can approve pending commands — only expose Yoke to
 people you trust.
+
+`!command` runs synchronously (15s timeout); `!timeout=120 command` raises the
+limit to 2 minutes. `!!command` starts a background job that returns
+immediately — check it with `/shell <id>`, `/shells`, or the Shell jobs panel,
+and stop it with `/shell stop <id>`.
 
 ## Development
 
@@ -173,7 +179,11 @@ All `/api/*` endpoints (except login) require `Authorization: Bearer <token>`.
 - `POST /api/reset` — reset agent context (archives all messages)
 - `POST /api/restore` — bring archived messages back into context
 - `GET /api/history?limit=n` — full message history for the active project (active + archived)
-- `POST /api/shell` `{ "command": "..." }` — run a shell command in the active workspace (waits for UI approval)
+- `POST /api/shell` `{ "command": "...", "timeout_seconds": n, "async": bool }` — run a shell command in the active workspace (waits for UI approval; `async: true` returns a `job_id` immediately and runs in the background)
+- `GET /api/shell/jobs` — list background shell jobs
+- `GET /api/shell/<id>` — status + output of a shell job
+- `POST /api/shell/<id>/stop` — stop a running shell job
+- `POST /api/agent/stop` — stop the current agent run
 - `GET /api/approvals` / `POST /api/approvals/<id>` `{ "action": "approve"|"deny", "always": bool }`
 - `POST /api/index` — (re)index the active workspace, returns counts
 - `GET /api/search?q=...` → `{ symbols, files }`

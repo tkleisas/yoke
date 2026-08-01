@@ -15,7 +15,7 @@ type Entry = PendingApproval & {
   resolve: (approved: boolean) => void;
 };
 
-const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
+const APPROVAL_TIMEOUT_MS = (parseInt(Deno.env.get("APPROVAL_TIMEOUT_MINUTES") || "5", 10) || 5) * 60 * 1000;
 
 const pending = new Map<string, Entry>();
 const alwaysApproved = new Set<string>();
