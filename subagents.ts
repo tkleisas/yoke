@@ -64,6 +64,7 @@ export function spawnSubagent(
   name = "subagent",
   maxIterations: number = DEFAULT_SUBAGENT_MAX_ITERATIONS,
   workspace?: string,
+  userId?: number,
 ): SubagentRecord {
   if (subagents.size >= MAX_CONCURRENT) {
     throw new Error(`Too many running subagents (max ${MAX_CONCURRENT}).`);
@@ -85,7 +86,7 @@ export function spawnSubagent(
     if (event.type === "step") record.steps++;
     else if (event.type === "finish") record.result = event.finalAnswer;
     else if (event.type === "error" && !record.error) record.error = event.error;
-  }, { maxIterations, workspace }).then(({ usage }) => {
+  }, { maxIterations, workspace, userId }).then(({ usage }) => {
     record.usage = usage;
     record.status = record.error ? "error" : "done";
     record.finishedAt = Date.now();

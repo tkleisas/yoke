@@ -48,6 +48,7 @@ export function startShellJob(
   requester: string,
   cwd: string,
   timeoutSeconds = 15,
+  userId?: number,
 ): ShellJob {
   prune();
   if (jobs.size >= MAX_JOBS) throw new Error(`Too many shell jobs (max ${MAX_JOBS}).`);
@@ -65,7 +66,7 @@ export function startShellJob(
 
   (async () => {
     if (!isAlwaysApproved(command)) {
-      const approved = await createApproval(command, requester);
+      const approved = await createApproval(command, requester, userId);
       if (!approved) {
         job.status = "denied";
         job.finishedAt = Date.now();

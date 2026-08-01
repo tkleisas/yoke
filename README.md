@@ -56,7 +56,8 @@ git tag v0.1.0 && git push origin v0.1.0
 - **Search** over indexed symbols and file paths.
 - **Web access**: the agent can search the web (`web_search`, via Bing RSS, no API key) and fetch pages as markdown (`web_fetch`). Also available from the UI as `/web <query>` and `/fetch <url>`.
 - **Shell commands** from the UI: `!command` runs synchronously (default 15s timeout), `!!command` runs in the **background** as a job, and `!timeout=<seconds>` / `!!timeout=<seconds>` sets a limit (1-3600s). Each command is approved from the web UI before it runs, instead of Deno prompting on the server terminal. Background jobs are listed in the Shell jobs panel and with `/shells` / `/shell <id>`; running jobs can be stopped.
-- **Slash commands** in the chat input: `/help`, `/clear`, `/reset`, `/compact`, `/summarize`, `/usage`, `/model`, `/thinking`, `/maxtries`, `/project`, `/reindex`, `/search`, `/shell`, `/shells`, `/status`, `/theme`, `/logout`.
+- **YOLO mode**: the 🔥 YOLO button (or `/yolo on`) disables approval prompts — shell commands, background jobs, and remote operations run immediately without confirmation. Enabled per user, with a confirmation dialog when turning it on; turn it off with `/yolo off`. **Extremely dangerous: only enable on machines you fully trust.**
+- **Slash commands** in the chat input: `/help`, `/clear`, `/reset`, `/compact`, `/summarize`, `/usage`, `/model`, `/thinking`, `/yolo`, `/maxtries`, `/project`, `/reindex`, `/search`, `/shell`, `/shells`, `/status`, `/theme`, `/logout`.
 
 ## Environment variables
 
@@ -171,6 +172,7 @@ All `/api/*` endpoints (except login) require `Authorization: Bearer <token>`.
 - `GET /api/status` → `{ user, model, user_model, models, max_iterations, project, projects, workspace, index, context, usage }`
 - `POST /api/model` `{ "model": "..." }` — set the user's model
 - `POST /api/thinking` `{ "thinking_effort": "low"|"medium"|"high"|"" }` — set the user's reasoning effort (empty = auto)
+- `POST /api/yolo` `{ "yolo": true|false }` — enable/disable YOLO mode for the user (skips approval prompts)
 - `POST /api/maxtries` `{ "max_iterations": n }` — set the user's max iterations (1-30000)
 - `GET /api/projects` / `POST /api/projects` / `DELETE /api/projects/<id>`
 - `POST /api/project` `{ "project_id": <id> | null }` — activate a project

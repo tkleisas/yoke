@@ -329,32 +329,35 @@ const TOOLS = [
 ];
 
 // ===== Local implementations =====
-// Every tool implementation receives (args, workspace) — the work directory
-// of the current project (or the default workspace).
-const TOOL_IMPLEMENTATIONS: Record<string, (args: any, workspace: string) => Promise<unknown>> = {
+// Every tool implementation receives (args, workspace, ctx) — the work
+// directory of the current project (or the default workspace), plus the
+// requesting user id (for approval checks).
+type ToolContext = { userId?: number };
+const TOOL_IMPLEMENTATIONS: Record<string, (args: any, workspace: string, ctx: ToolContext) => Promise<unknown>> = {
   read_file: (args, ws) => readFileTool(args.path, ws),
   write_file: (args, ws) => writeFileTool(args.path, args.content, ws),
   list_directory: (args, ws) => listDirTool(args.path, ws),
   search_code: async (args, ws) => searchCode(args.query, ws),
-  run_command: async (args, ws) => {
+  run_command: async (args, ws, ctx) => {
     const command = String(args.command ?? "").trim();
     if (!command) return { error: "Missing 'command'." };
     if (!hasRunPermission()) {
       return { error: "Shell execution requires Deno run permission. Restart Yoke with the --allow-run flag." };
     }
     const label = `[local] ${command}`;
-    if (!isAlwaysApproved(label) && !await createApproval(label, "agent")) {
+    if (!isAlwaysApproved(label) && !await createApproval(label, "agent", ctx.userId)) {
       return { error: "Command was not approved (denied, or the approval prompt expired)." };
     }
     const timeoutSeconds = clampInt(Number(args.timeout_seconds), 15, 1, 3600);
     return await runShellCommand(command, ws, timeoutSeconds * 1000);
   },
-  spawn_subagent: async (args, ws) => {
+  spawn_subagent: async (args, ws, ctx) => {
     const record = spawnSubagent(
       String(args.task ?? ""),
       String(args.name ?? "subagent"),
       clampInt(Number(args.max_iterations), DEFAULT_SUBAGENT_MAX_ITERATIONS, 1, MAX_MAX_ITERATIONS),
       ws,
+      ctx.userId,
     );
     return { id: record.id, name: record.name, status: record.status };
   },
@@ -373,13 +376,13 @@ const TOOL_IMPLEMENTATIONS: Record<string, (args: any, workspace: string) => Pro
   list_subagents: async () => listSubagents().map(statusOf),
   web_search: async (args) => searchWeb(String(args.query ?? ""), Math.min(Math.max(Number(args.max_results) || 6, 1), 10)),
   web_fetch: async (args) => fetchWebPage(String(args.url ?? "")),
-  remote_exec: async (args, ws) => {
+  remote_exec: async (args, ws, ctx) => {
     const host = getHostByName(String(args.host ?? ""));
     if (!host) return { error: `Unknown host '${args.host}'. Configure it via /api/hosts.` };
     const command = String(args.command ?? "").trim();
     if (!command) return { error: "Missing 'command'." };
     const label = `[ssh ${host.name}] ${command}`;
-    if (!isAlwaysApproved(label) && !await createApproval(label, "agent")) {
+    if (!isAlwaysApproved(label) && !await createApproval(label, "agent", ctx.userId)) {
       return { error: "Command was not approved." };
     }
     return truncate(formatExecResult(await sshExec(host, command)));
@@ -389,7 +392,7 @@ const TOOL_IMPLEMENTATIONS: Record<string, (args: any, workspace: string) => Pro
     if (!host) return { error: `Unknown host '${args.host}'. Configure it via /api/hosts.` };
     return await sshStatus(host);
   },
-  remote_upload: async (args, ws) => {
+  remote_upload: async (args, ws, ctx) => {
     const host = getHostByName(String(args.host ?? ""));
     if (!host) return { error: `Unknown host '${args.host}'.` };
     const localPath = String(args.local_path ?? "").trim();
@@ -397,24 +400,24 @@ const TOOL_IMPLEMENTATIONS: Record<string, (args: any, workspace: string) => Pro
     if (!localPath || !remotePath) return { error: "local_path and remote_path are required." };
     const fullLocal = resolve(ws, localPath);
     const label = `[upload to ${host.name}] ${localPath} -> ${remotePath}`;
-    if (!isAlwaysApproved(label) && !await createApproval(label, "agent")) {
+    if (!isAlwaysApproved(label) && !await createApproval(label, "agent", ctx.userId)) {
       return { error: "Upload was not approved." };
     }
     const bytes = await sftpUploadFile(host, fullLocal, remotePath);
     return `Uploaded ${bytes} bytes to ${host.name}:${remotePath}.`;
   },
-  remote_fetch: async (args) => {
+  remote_fetch: async (args, ws, ctx) => {
     const host = getHostByName(String(args.host ?? ""));
     if (!host) return { error: `Unknown host '${args.host}'.` };
     const remotePath = String(args.remote_path ?? "").trim();
     if (!remotePath) return { error: "Missing 'remote_path'." };
     const label = `[fetch from ${host.name}] ${remotePath}`;
-    if (!isAlwaysApproved(label) && !await createApproval(label, "agent")) {
+    if (!isAlwaysApproved(label) && !await createApproval(label, "agent", ctx.userId)) {
       return { error: "Fetch was not approved." };
     }
     return truncate(await sftpReadFile(host, remotePath));
   },
-  deploy: async (args, ws) => {
+  deploy: async (args, ws, ctx) => {
     const host = getHostByName(String(args.host ?? ""));
     if (!host) return { error: `Unknown host '${args.host}'.` };
     const projectName = String(args.project ?? "").trim() || "workspace";
@@ -422,7 +425,7 @@ const TOOL_IMPLEMENTATIONS: Record<string, (args: any, workspace: string) => Pro
     const remoteDir = remotePath || `${(await sshHomeDir(host)).replace(/[\\/]+$/, "")}/yoke-deploy/${projectName}`;
     const postDeploy = args.post_deploy ? String(args.post_deploy).trim() : undefined;
     const label = `[deploy to ${host.name}] ${projectName} -> ${remoteDir}`;
-    if (!isAlwaysApproved(label) && !await createApproval(label, "agent")) {
+    if (!isAlwaysApproved(label) && !await createApproval(label, "agent", ctx.userId)) {
       return { error: "Deploy was not approved." };
     }
     return await sshDeploy(host, ws, remoteDir, postDeploy);
@@ -689,7 +692,7 @@ export async function runAgent(
   messages: ChatMessage[],
   task: string,
   onEvent: (event: AgentEvent) => void,
-  options: { model?: string; maxIterations?: number; workspace?: string; thinkingEffort?: string; signal?: AbortSignal } = {},
+  options: { model?: string; maxIterations?: number; workspace?: string; thinkingEffort?: string; signal?: AbortSignal; userId?: number } = {},
 ): Promise<{ usage: AgentUsage }> {
   const model = options.model || DEEPSEEK_MODEL;
   const maxIterations = clampInt(options.maxIterations, DEFAULT_MAX_ITERATIONS, 1, MAX_MAX_ITERATIONS);
@@ -787,7 +790,7 @@ export async function runAgent(
           error = `Unknown tool: ${name}`;
         } else {
           try {
-            result = await impl(args, workspace);
+            result = await impl(args, workspace, { userId: options.userId });
           } catch (err) {
             error = errString(err);
           }

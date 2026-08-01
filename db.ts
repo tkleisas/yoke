@@ -109,6 +109,7 @@ for (const migration of [
   "ALTER TABLE indexed_files ADD COLUMN workspace TEXT NOT NULL DEFAULT ''",
   "ALTER TABLE hosts ADD COLUMN sudo_password TEXT NOT NULL DEFAULT ''",
   "ALTER TABLE users ADD COLUMN thinking_effort TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE users ADD COLUMN yolo INTEGER NOT NULL DEFAULT 0",
 ]) {
   try {
     db.exec(migration);

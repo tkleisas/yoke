@@ -14,6 +14,7 @@ import { createProject, deleteProject, getActiveProjectId, getEffectiveModel, ge
 import { fetchWebPage, searchWeb } from "./web.ts";
 import { createApproval, isAlwaysApproved, listPendingApprovals, respondApproval } from "./approvals.ts";
 import { getShellJob, listShellJobs, startShellJob, stopShellJob, type ShellJob } from "./shells.ts";
+import { isYoloEnabled, setYoloEnabled } from "./yolo.ts";
 import {
   createHost, deleteHost, formatExecResult, getHost, listHosts, publicHost, sftpReadFile, sftpUploadFile,
   sshDeploy, sshExec, sshHomeDir, sshStatus, truncate, updateHost, type Host,
@@ -144,6 +145,7 @@ async function handleApi(request: Request): Promise<Response> {
       models: ALLOWED_MODELS,
       thinking_effort: getThinkingEffortForUser(auth.user.id),
       thinking_efforts: THINKING_EFFORTS,
+      yolo: isYoloEnabled(auth.user.id),
       max_iterations: getMaxIterationsForUser(auth.user.id) ?? DEFAULT_MAX_ITERATIONS,
       project,
       projects: listProjects(),
@@ -297,6 +299,19 @@ async function handleApi(request: Request): Promise<Response> {
     }
   }
 
+  if (path === "/api/yolo" && method === "POST") {
+    const auth = requireAuth(request);
+    if (auth instanceof Response) return auth;
+    try {
+      const body = await readJson(request);
+      const enabled = body.yolo === true;
+      setYoloEnabled(auth.user.id, enabled);
+      return json({ yolo: isYoloEnabled(auth.user.id) });
+    } catch (err) {
+      return errorResponse(err);
+    }
+  }
+
   if (path === "/api/compact" && method === "POST") {
     const auth = requireAuth(request);
     if (auth instanceof Response) return auth;
@@ -372,14 +387,15 @@ async function handleApi(request: Request): Promise<Response> {
       // approval (if needed) and runs in the background. Poll GET
       // /api/shell/<id> for status/output.
       if (body.async === true) {
-        const job = startShellJob(command, auth.user.username, cwd, timeoutSeconds);
+        const job = startShellJob(command, auth.user.username, cwd, timeoutSeconds, auth.user.id);
         return json({ job_id: job.id, status: job.status, timeout_seconds: timeoutSeconds });
       }
 
       // Human-in-the-loop approval: unless this exact command was already
       // approved ("allow always"), wait for the user to approve it in the UI.
+      // YOLO-mode users skip the prompt entirely.
       if (!isAlwaysApproved(command)) {
-        const approved = await createApproval(command, auth.user.username);
+        const approved = await createApproval(command, auth.user.username, auth.user.id);
         if (!approved) {
           return json({ error: "Command was not approved (denied, or the approval prompt expired)." }, 403);
         }
@@ -434,6 +450,7 @@ async function handleApi(request: Request): Promise<Response> {
           ? Math.min(Math.max(Math.floor(Number(body.max_iterations)), 1), MAX_MAX_ITERATIONS)
           : undefined,
         getEffectiveWorkspace(auth.user.id),
+        auth.user.id,
       );
       return json({ subagent: statusOf(record) }, 201);
     } catch (err) {
@@ -533,10 +550,11 @@ async function handleApi(request: Request): Promise<Response> {
         return json({ output: await sshStatus(host) });
       }
 
-      // Everything else requires human approval from the web UI.
+      // Everything else requires human approval from the web UI (unless the
+      // requesting user has YOLO mode enabled).
       const approve = async (label: string): Promise<boolean> => {
         if (isAlwaysApproved(label)) return true;
-        return await createApproval(label, requester);
+        return await createApproval(label, requester, auth.user.id);
       };
 
       if (action === "exec") {
@@ -687,6 +705,7 @@ async function handleApi(request: Request): Promise<Response> {
             workspace,
             thinkingEffort,
             signal: abortController.signal,
+            userId: auth.user.id,
           }).then((result) => {
             // Append only the messages produced by this run; earlier history
             // rows are never rewritten or deleted.

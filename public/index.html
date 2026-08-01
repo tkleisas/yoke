@@ -106,6 +106,13 @@
       font-size: 0.9rem;
     }
     .icon-btn:hover { background: var(--surface-2); }
+    #yolo-toggle.active {
+      background: #f97316;
+      border-color: #f97316;
+      color: #fff;
+      font-weight: 700;
+    }
+    #yolo-toggle.active:hover { background: #ea580c; }
 
     /* ---------- Main ---------- */
     main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -465,6 +472,7 @@
     <select id="model-select" title="Agent model" hidden></select>
     <select id="effort-select" title="Thinking effort" hidden></select>
     <button id="dark-toggle" class="icon-btn" title="Toggle dark mode">🌙</button>
+    <button id="yolo-toggle" class="icon-btn" title="YOLO mode: run shell/remote commands without approval prompts (dangerous)" hidden>🔥 YOLO</button>
     <span id="user-badge" class="user-badge" hidden></span>
     <button id="btn-logout" class="icon-btn" hidden>Log out</button>
   </header>
@@ -596,7 +604,9 @@
     const effortSelect = document.getElementById('effort-select');
     const iterationStatus = document.getElementById('iteration-status');
     const stopBtn = document.getElementById('stop');
+    const yoloToggle = document.getElementById('yolo-toggle');
     const EFFORT_LABELS = { '': 'auto', low: 'low', medium: 'medium', high: 'high' };
+    let yoloEnabled = false;
 
     let auth = JSON.parse(localStorage.getItem(AUTH_KEY) || 'null');
     let running = false;
@@ -648,6 +658,7 @@
       updateProjectButtons();
       modelSelect.hidden = !loggedIn || modelSelect.options.length < 2;
       effortSelect.hidden = !loggedIn;
+      yoloToggle.hidden = !loggedIn;
       if (loggedIn) {
         document.getElementById('user-badge').textContent = `👤 ${auth.user.username}`;
       }
@@ -717,6 +728,8 @@
         if (data.thinking_efforts && data.thinking_effort !== undefined) {
           populateThinkingEfforts(data.thinking_efforts, data.thinking_effort);
         }
+        if (data.yolo !== undefined) yoloEnabled = !!data.yolo;
+        updateYoloButton();
         if (data.projects) populateProjects(data.projects, data.project && data.project.id);
         if (data.workspace) lastWorkspace = data.workspace;
       } catch { /* ignore */ }
@@ -1594,6 +1607,7 @@
       ['/usage', 'Show context size and token usage'],
       ['/model [name]', 'Show models or switch the model (e.g. /model deepseek-chat)'],
       ['/thinking [auto|low|medium|high]', 'Show or set the reasoning/thinking effort (auto = provider default)'],
+      ['/yolo [on|off|toggle]', 'Toggle YOLO mode — run shell/remote commands without approval prompts (dangerous)'],
       ['/maxtries [n]', 'Show or set the max agent iterations (1-30000, default 100)'],
       ['/reindex', 'Reindex the workspace'],
       ['/search <query>', 'Search indexed symbols and files'],
@@ -2256,6 +2270,40 @@
       }
     });
 
+    /* ---------- YOLO mode ---------- */
+    function updateYoloButton() {
+      yoloToggle.classList.toggle('active', yoloEnabled);
+      yoloToggle.title = yoloEnabled
+        ? 'YOLO mode is ON — shell/remote commands run without approval prompts'
+        : 'YOLO mode: run shell/remote commands without approval prompts (dangerous)';
+    }
+
+    async function setYolo(enable) {
+      if (enable && !confirm('🔥 YOLO mode will run ALL shell commands and remote operations WITHOUT approval prompts. This is extremely dangerous — anything you type (or the agent decides to do) executes immediately. Continue?')) {
+        return false;
+      }
+      try {
+        const res = await fetch('/api/yolo', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({ yolo: enable }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        yoloEnabled = !!data.yolo;
+        updateYoloButton();
+        addSystemMessage(yoloEnabled
+          ? '🔥 YOLO mode ON — commands run without approval prompts.'
+          : 'YOLO mode off — approval prompts are back.');
+        return true;
+      } catch (err) {
+        addError(`Failed to toggle YOLO mode: ${err.message}`);
+        return false;
+      }
+    }
+
+    yoloToggle.addEventListener('click', () => setYolo(!yoloEnabled));
+
     function applyModelCommand(arg) {
       if (!arg) {
         const models = Array.from(modelSelect.options).map((o) => o.value);
@@ -2309,6 +2357,7 @@
           `- **Workspace:** \`${data.workspace}\`\n` +
           `- **Model:** \`${data.model}\`\n` +
           `- **Thinking effort:** \`${EFFORT_LABELS[data.thinking_effort] || data.thinking_effort || 'auto'}\`\n` +
+          `- **YOLO mode:** ${data.yolo ? '🔥 **ON**' : 'off'}\n` +
           `- **Max iterations:** ${data.max_iterations}\n` +
           `- **Theme:** \`${document.documentElement.dataset.theme}\`\n` +
           `- **Indexed files:** ${data.index.files}\n` +
@@ -2406,6 +2455,16 @@
           }
           effortSelect.value = value;
           effortSelect.dispatchEvent(new Event('change'));
+          break;
+        }
+        case 'yolo': {
+          const choice = (arg || 'toggle').toLowerCase();
+          let enable;
+          if (choice === 'on' || choice === '1' || choice === 'true') enable = true;
+          else if (choice === 'off' || choice === '0' || choice === 'false') enable = false;
+          else if (choice === 'toggle' || choice === '') enable = !yoloEnabled;
+          else { addError('Usage: /yolo <on|off|toggle>'); break; }
+          await setYolo(enable);
           break;
         }
         case 'maxtries': {
