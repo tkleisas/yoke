@@ -1,6 +1,6 @@
 // agent.ts
 import { resolve } from "https://deno.land/std@0.224.0/path/mod.ts";
-import { readFileTool, writeFileTool, listDirTool, workspacePath } from "./tools.ts";
+import { readFileTool, writeFileTool, listDirTool, runShellCommand, hasRunPermission, workspacePath } from "./tools.ts";
 import { searchCode } from "./index.ts";
 import { fetchWebPage, searchWeb } from "./web.ts";
 import { createApproval, isAlwaysApproved } from "./approvals.ts";
@@ -9,7 +9,10 @@ import { getSubagent, listSubagents, spawnSubagent, statusOf, waitForSubagent } 
 
 // ===== Types =====
 export type AgentEvent =
+  | { type: "tool_start"; step: number; action: string; args: Record<string, unknown> }
   | { type: "step"; step: number; action: string; args: Record<string, unknown>; result?: unknown; error?: string }
+  | { type: "delta"; content: string }
+  | { type: "reasoning"; content: string }
   | { type: "usage"; promptTokens: number; completionTokens: number; totalTokens: number }
   | { type: "finish"; finalAnswer: string }
   | { type: "error"; error: string };
@@ -57,16 +60,18 @@ function envInt(name: string, fallback: number, min: number, max: number): numbe
   return clampInt(Number.isNaN(parsed) ? undefined : parsed, fallback, min, max);
 }
 
-export const DEFAULT_MAX_ITERATIONS = envInt("MAX_ITERATIONS", 10, 1, 100);
-export const DEFAULT_SUBAGENT_MAX_ITERATIONS = envInt("MAX_SUBAGENT_ITERATIONS", DEFAULT_MAX_ITERATIONS, 1, 100);
+export const MAX_MAX_ITERATIONS = 30000;
+export const DEFAULT_MAX_ITERATIONS = envInt("MAX_ITERATIONS", 10, 1, MAX_MAX_ITERATIONS);
+export const DEFAULT_SUBAGENT_MAX_ITERATIONS = envInt("MAX_SUBAGENT_ITERATIONS", DEFAULT_MAX_ITERATIONS, 1, MAX_MAX_ITERATIONS);
 
 export const SYSTEM_PROMPT = `You are a coding assistant that uses tools to complete tasks.
-You have access to read_file, write_file, list_directory, search_code, and finish.
+You have access to read_file, write_file, list_directory, search_code, run_command, and finish.
 Always decide which tool to call next. When the task is complete, call the finish tool with a final answer.
 If a tool call returns an error, you may retry with corrected arguments.
 The workspace is limited to the directory provided.
 The codebase is indexed: use search_code to find symbols or files before reading them.
 This is a continuing conversation: use prior context to answer follow-up tasks.
+run_command executes local shell commands inside the workspace (e.g. git status, deno task test) and requires user approval before it runs.
 For parallel subtasks, spawn background subagents with spawn_subagent, poll their status with check_subagent (periodically), or block for a result with wait_subagent. Use list_subagents to see active subagents.
 You can also access the web: use web_search to find information and web_fetch to read a specific page (returned as markdown text).
 You can manage remote servers: remote_status checks a configured host, remote_exec runs commands over SSH, remote_upload/remote_fetch transfer files via SFTP, and deploy ships the workspace to a host. Remote operations that change state require user approval.`;
@@ -127,6 +132,20 @@ const TOOLS = [
           query: { type: "string", description: "Substring to search for in symbol names, signatures, or file paths." }
         },
         required: ["query"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "run_command",
+      description: "Run a local shell command in the workspace directory. Requires user approval in the UI before it executes.",
+      parameters: {
+        type: "object",
+        properties: {
+          command: { type: "string", description: "The shell command to run (e.g. 'git status', 'ls -la', 'deno task test')." }
+        },
+        required: ["command"]
       }
     }
   },
@@ -315,11 +334,23 @@ const TOOL_IMPLEMENTATIONS: Record<string, (args: any, workspace: string) => Pro
   write_file: (args, ws) => writeFileTool(args.path, args.content, ws),
   list_directory: (args, ws) => listDirTool(args.path, ws),
   search_code: async (args, ws) => searchCode(args.query, ws),
+  run_command: async (args, ws) => {
+    const command = String(args.command ?? "").trim();
+    if (!command) return { error: "Missing 'command'." };
+    if (!hasRunPermission()) {
+      return { error: "Shell execution requires Deno run permission. Restart Yoke with the --allow-run flag." };
+    }
+    const label = `[local] ${command}`;
+    if (!isAlwaysApproved(label) && !await createApproval(label, "agent")) {
+      return { error: "Command was not approved." };
+    }
+    return await runShellCommand(command, ws);
+  },
   spawn_subagent: async (args, ws) => {
     const record = spawnSubagent(
       String(args.task ?? ""),
       String(args.name ?? "subagent"),
-      clampInt(Number(args.max_iterations), DEFAULT_SUBAGENT_MAX_ITERATIONS, 1, 100),
+      clampInt(Number(args.max_iterations), DEFAULT_SUBAGENT_MAX_ITERATIONS, 1, MAX_MAX_ITERATIONS),
       ws,
     );
     return { id: record.id, name: record.name, status: record.status };
@@ -402,25 +433,61 @@ type ApiUsage = { prompt_tokens: number; completion_tokens: number; total_tokens
 async function callDeepSeek(
   messages: ChatMessage[],
   model: string,
+  thinkingEffort?: string,
+  onDelta?: (type: "delta" | "reasoning", content: string) => void,
 ): Promise<{ toolCalls?: ToolCall[]; finishAnswer?: string; usage?: ApiUsage }> {
   if (!DEEPSEEK_API_KEY) {
     console.warn("Using mock reasoning (no DEEPSEEK_API_KEY)");
     return mockReasoning(messages);
   }
 
+  const body: Record<string, unknown> = {
+    model,
+    messages,
+    tools: TOOLS,
+    tool_choice: "auto",
+    temperature: 0.2,
+  };
+  // OpenAI-compatible "reasoning effort" knob; "auto" (unset) sends nothing so
+  // the provider uses its default. Only sent when the user picked one.
+  if (thinkingEffort) body.reasoning_effort = thinkingEffort;
+
+  if (!onDelta) {
+    const response = await fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${DEEPSEEK_API_KEY}`,
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`DeepSeek API error: ${response.status} - ${errorText}`);
+    }
+
+    const data = await response.json();
+    const choice = data.choices?.[0];
+    if (!choice) throw new Error("No choice from DeepSeek");
+
+    const usage: ApiUsage | undefined = data.usage;
+    const message = choice.message;
+    if (message.tool_calls && message.tool_calls.length > 0) {
+      return { toolCalls: message.tool_calls, usage };
+    } else {
+      return { finishAnswer: message.content || "", usage };
+    }
+  }
+
+  // Streaming: emit deltas as they arrive and accumulate the full message.
   const response = await fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "Authorization": `Bearer ${DEEPSEEK_API_KEY}`,
     },
-    body: JSON.stringify({
-      model,
-      messages,
-      tools: TOOLS,
-      tool_choice: "auto",
-      temperature: 0.2,
-    }),
+    body: JSON.stringify({ ...body, stream: true, stream_options: { include_usage: true } }),
   });
 
   if (!response.ok) {
@@ -428,17 +495,67 @@ async function callDeepSeek(
     throw new Error(`DeepSeek API error: ${response.status} - ${errorText}`);
   }
 
-  const data = await response.json();
-  const choice = data.choices?.[0];
-  if (!choice) throw new Error("No choice from DeepSeek");
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let content = "";
+  const toolCalls: ToolCall[] = [];
+  let usage: ApiUsage | undefined;
 
-  const usage: ApiUsage | undefined = data.usage;
-  const message = choice.message;
-  if (message.tool_calls && message.tool_calls.length > 0) {
-    return { toolCalls: message.tool_calls, usage };
-  } else {
-    return { finishAnswer: message.content || "", usage };
+  const flush = (chunk: string) => {
+    buffer += chunk;
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data:")) continue;
+      const payload = trimmed.slice(5).trim();
+      if (payload === "[DONE]") continue;
+      let json: {
+        usage?: ApiUsage;
+        choices?: Array<{ delta?: { content?: string; reasoning_content?: string; reasoning?: string; tool_calls?: Array<{
+          index?: number;
+          id?: string;
+          function?: { name?: string; arguments?: string };
+        }> } }>;
+      };
+      try {
+        json = JSON.parse(payload);
+      } catch {
+        continue; // partial line — wait for the next chunk
+      }
+      if (json.usage) usage = json.usage;
+      const delta = json.choices?.[0]?.delta;
+      if (!delta) continue;
+      const reasoning = delta.reasoning_content ?? delta.reasoning;
+      if (reasoning) onDelta("reasoning", reasoning);
+      if (delta.content) {
+        content += delta.content;
+        onDelta("delta", delta.content);
+      }
+      if (delta.tool_calls) {
+        for (const tc of delta.tool_calls) {
+          const index = tc.index ?? 0;
+          toolCalls[index] ??= { id: "", type: "function", function: { name: "", arguments: "" } };
+          if (tc.id) toolCalls[index].id = tc.id;
+          if (tc.function?.name) toolCalls[index].function.name += tc.function.name;
+          if (tc.function?.arguments) toolCalls[index].function.arguments += tc.function.arguments;
+        }
+      }
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    flush(decoder.decode(value, { stream: true }));
   }
+
+  const completeCalls = toolCalls.filter((tc) => tc.id && tc.function.name);
+  if (completeCalls.length > 0) {
+    return { toolCalls: completeCalls, usage };
+  }
+  return { finishAnswer: content, usage };
 }
 
 // ===== Conversation summarization (EXPORTED) =====
@@ -566,10 +683,10 @@ export async function runAgent(
   messages: ChatMessage[],
   task: string,
   onEvent: (event: AgentEvent) => void,
-  options: { model?: string; maxIterations?: number; workspace?: string } = {},
+  options: { model?: string; maxIterations?: number; workspace?: string; thinkingEffort?: string } = {},
 ): Promise<{ usage: AgentUsage }> {
   const model = options.model || DEEPSEEK_MODEL;
-  const maxIterations = clampInt(options.maxIterations, DEFAULT_MAX_ITERATIONS, 1, 100);
+  const maxIterations = clampInt(options.maxIterations, DEFAULT_MAX_ITERATIONS, 1, MAX_MAX_ITERATIONS);
   const workspace = options.workspace || workspacePath;
   if (!messages.some((m) => m.role === "system")) {
     messages.unshift({ role: "system", content: SYSTEM_PROMPT });
@@ -596,7 +713,12 @@ export async function runAgent(
     let finishAnswer: string | undefined;
 
     try {
-      const response = await callDeepSeek(messages, model);
+      const response = await callDeepSeek(
+        messages,
+        model,
+        options.thinkingEffort,
+        (type, content) => onEvent({ type, content }),
+      );
       toolCalls = response.toolCalls;
       finishAnswer = response.finishAnswer;
       if (response.usage) {
@@ -638,6 +760,9 @@ export async function runAgent(
       } catch {
         error = `Invalid JSON arguments for ${name}: ${toolCall.function.arguments}`;
       }
+
+      // Show the tool call in the UI immediately (it may wait for approval).
+      onEvent({ type: "tool_start", step: iteration, action: name, args });
 
       let result: unknown;
       if (!error) {

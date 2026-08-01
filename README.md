@@ -41,7 +41,10 @@ git tag v0.1.0 && git push origin v0.1.0
 
 ## Features
 
-- **Agent loop** with tools: `read_file`, `write_file`, `list_directory`, `search_code`, `finish`.
+- **Agent loop** with tools: `read_file`, `write_file`, `list_directory`, `search_code`, `run_command`, `finish`.
+- **Token streaming**: the agent's reply streams into the chat as it's generated, including a collapsible **thinking** block for reasoning content. Tool calls show up instantly and update as they complete.
+- **Thinking effort**: per-user `reasoning_effort` selection (`auto`/`low`/`medium`/`high`) via the header dropdown, `/thinking`, or `POST /api/thinking`; `auto` sends nothing so the provider uses its default.
+- **Local shell commands**: the agent can run workspace shell commands (`run_command` tool) and you can run them directly with `!command` — each one is approved from the web UI before it runs.
 - **User accounts** (username + password) stored in SQLite. Passwords are hashed with PBKDF2-SHA256.
 - **Session tokens**: login issues a session token (stored in SQLite, expires after 7 days) used as `Authorization: Bearer <token>`.
 - **CLI-only user creation**: accounts are created with `create-user.ts` — the web UI only supports logging in.
@@ -53,7 +56,7 @@ git tag v0.1.0 && git push origin v0.1.0
 - **Search** over indexed symbols and file paths.
 - **Web access**: the agent can search the web (`web_search`, via Bing RSS, no API key) and fetch pages as markdown (`web_fetch`). Also available from the UI as `/web <query>` and `/fetch <url>`.
 - **Shell commands** from the UI via `!command` (runs server-side in the active workspace) — each command is approved from the web UI before it runs, instead of Deno prompting on the server terminal.
-- **Slash commands** in the chat input: `/help`, `/clear`, `/reset`, `/compact`, `/summarize`, `/usage`, `/model`, `/maxtries`, `/project`, `/reindex`, `/search`, `/status`, `/theme`, `/logout`.
+- **Slash commands** in the chat input: `/help`, `/clear`, `/reset`, `/compact`, `/summarize`, `/usage`, `/model`, `/thinking`, `/maxtries`, `/project`, `/reindex`, `/search`, `/status`, `/theme`, `/logout`.
 
 ## Environment variables
 
@@ -66,7 +69,7 @@ git tag v0.1.0 && git push origin v0.1.0
 | `WORKSPACE_DIR` | `.` | Default workspace directory (used when no project is active). Shell commands run here. |
 | `DATABASE_PATH` | `./yoke.db` | SQLite database file (users, sessions, projects, index, context, usage). |
 | `PORT` | `8080` | HTTP port. |
-| `MAX_ITERATIONS` | `10` | Default max LLM iterations per agent run (1-100). |
+| `MAX_ITERATIONS` | `10` | Default max LLM iterations per agent run (1-30000). |
 | `MAX_SUBAGENT_ITERATIONS` | `MAX_ITERATIONS` | Default max LLM iterations for subagents. |
 | `ENABLE_HTTPS` | *(off)* | Set to `1` to serve HTTPS and auto-generate a self-signed certificate on first run. |
 | `TLS_CERT_PATH` | `./certs/cert.pem` | Path to the TLS certificate (PEM). |
@@ -161,7 +164,8 @@ All `/api/*` endpoints (except login) require `Authorization: Bearer <token>`.
 - `GET /api/me` → `{ user }`
 - `GET /api/status` → `{ user, model, user_model, models, max_iterations, project, projects, workspace, index, context, usage }`
 - `POST /api/model` `{ "model": "..." }` — set the user's model
-- `POST /api/maxtries` `{ "max_iterations": n }` — set the user's max iterations (1-100)
+- `POST /api/thinking` `{ "thinking_effort": "low"|"medium"|"high"|"" }` — set the user's reasoning effort (empty = auto)
+- `POST /api/maxtries` `{ "max_iterations": n }` — set the user's max iterations (1-30000)
 - `GET /api/projects` / `POST /api/projects` / `DELETE /api/projects/<id>`
 - `POST /api/project` `{ "project_id": <id> | null }` — activate a project
 - `POST /api/compact` `{ "keep": n }` — trim agent context to the last n messages (archives the rest)

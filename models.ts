@@ -29,3 +29,22 @@ export function setModelForUser(userId: number, model: string): boolean {
   db.prepare("UPDATE users SET model = ? WHERE id = ?").run(model, userId);
   return true;
 }
+
+// ===== Thinking effort =====
+// "" (auto) sends nothing so the provider uses its default; otherwise the
+// OpenAI-compatible reasoning_effort value (low/medium/high) is sent.
+export const THINKING_EFFORTS: string[] = ["", "low", "medium", "high"];
+
+export function getThinkingEffortForUser(userId: number): string {
+  const row = db.prepare("SELECT thinking_effort FROM users WHERE id = ?").get(userId) as
+    | { thinking_effort: string | null }
+    | undefined;
+  const effort = row?.thinking_effort ?? "";
+  return THINKING_EFFORTS.includes(effort) ? effort : "";
+}
+
+export function setThinkingEffortForUser(userId: number, effort: string): boolean {
+  if (!THINKING_EFFORTS.includes(effort)) return false;
+  db.prepare("UPDATE users SET thinking_effort = ? WHERE id = ?").run(effort, userId);
+  return true;
+}

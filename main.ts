@@ -2,15 +2,14 @@
 import { serve, serveTls } from "https://deno.land/std@0.224.0/http/server.ts";
 import { resolve } from "https://deno.land/std@0.224.0/path/mod.ts";
 import { db } from "./db.ts";
-import { runAgent, summarizeConversation, SYSTEM_PROMPT, type AgentEvent, type ChatMessage } from "./agent.ts";
-import { ensureWorkspace, workspacePath } from "./tools.ts";
+import { runAgent, summarizeConversation, SYSTEM_PROMPT, type AgentEvent, type ChatMessage, DEFAULT_MAX_ITERATIONS, MAX_MAX_ITERATIONS } from "./agent.ts";
+import { ensureWorkspace, hasRunPermission, runShellCommand, workspacePath } from "./tools.ts";
 import { loadOrCreateTls } from "./certs.ts";
 import { AuthError, cleanupExpiredSessions, extractToken, getUserByToken, loginUser, logoutSession, type AuthUser } from "./auth.ts";
 import { indexWorkspace, indexStats, searchSymbols, searchFiles } from "./index.ts";
 import { appendConversation, archiveAllActive, compactConversation, conversationStats, estimateTokens, getConversation, getHistory, getMaxIterationsForUser, recordUsage, resetConversation, restoreConversation, setMaxIterationsForUser, usageSummary } from "./context.ts";
-import { ALLOWED_MODELS, getModelForUser, setModelForUser } from "./models.ts";
+import { ALLOWED_MODELS, getModelForUser, setModelForUser, THINKING_EFFORTS, getThinkingEffortForUser, setThinkingEffortForUser } from "./models.ts";
 import { spawnSubagent, listSubagents, statusOf } from "./subagents.ts";
-import { DEFAULT_MAX_ITERATIONS, DEFAULT_SUBAGENT_MAX_ITERATIONS } from "./agent.ts";
 import { createProject, deleteProject, getActiveProjectId, getEffectiveModel, getEffectiveWorkspace, getProject, listProjects, setActiveProjectId, updateProject } from "./projects.ts";
 import { fetchWebPage, searchWeb } from "./web.ts";
 import { createApproval, isAlwaysApproved, listPendingApprovals, respondApproval } from "./approvals.ts";
@@ -40,16 +39,6 @@ try {
   db.prepare("UPDATE indexed_files SET workspace = ? WHERE workspace = ''").run(resolve(workspacePath));
 } catch {
   // ignored
-}
-
-// Check Deno's run permission so we can route approvals through the web UI
-// instead of letting Deno prompt on the terminal.
-function hasRunPermission(): boolean {
-  try {
-    return Deno.permissions.querySync({ name: "run" }).state === "granted";
-  } catch {
-    return false;
-  }
 }
 
 if (!hasRunPermission()) {
@@ -87,42 +76,6 @@ async function readJson(request: Request): Promise<Record<string, unknown>> {
     return body as Record<string, unknown>;
   } catch {
     throw new AuthError(400, "Invalid JSON body.");
-  }
-}
-
-// ===== Shell execution (used by the "!command" UI operator) =====
-const SHELL_TIMEOUT_MS = 15_000;
-const MAX_SHELL_OUTPUT_CHARS = 50_000;
-
-async function runShellCommand(command: string, cwd: string): Promise<string> {
-  const isWindows = Deno.build.os === "windows";
-  const shell = isWindows ? "cmd" : "sh";
-  const args = isWindows ? ["/c", command] : ["-c", command];
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), SHELL_TIMEOUT_MS);
-  try {
-    const result = await new Deno.Command(shell, {
-      args,
-      cwd,
-      stdout: "piped",
-      stderr: "piped",
-      signal: controller.signal,
-    }).output();
-    const decoder = new TextDecoder();
-    let output = `${decoder.decode(result.stdout)}${decoder.decode(result.stderr)}`.trim();
-    if (output.length > MAX_SHELL_OUTPUT_CHARS) {
-      output = output.slice(0, MAX_SHELL_OUTPUT_CHARS) + "\n...[truncated]";
-    }
-    if (!output) output = `(exit code ${result.code}, no output)`;
-    else if (result.code !== 0) output = `(exit code ${result.code})\n${output}`;
-    return output;
-  } catch (err) {
-    if (err instanceof DOMException && err.name === "AbortError") {
-      return `Command timed out after ${SHELL_TIMEOUT_MS / 1000} seconds.`;
-    }
-    throw new Error(`Failed to run command: ${errString(err)}`);
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -172,6 +125,8 @@ async function handleApi(request: Request): Promise<Response> {
       model: getEffectiveModel(auth.user.id, projectId),
       user_model: getModelForUser(auth.user.id),
       models: ALLOWED_MODELS,
+      thinking_effort: getThinkingEffortForUser(auth.user.id),
+      thinking_efforts: THINKING_EFFORTS,
       max_iterations: getMaxIterationsForUser(auth.user.id) ?? DEFAULT_MAX_ITERATIONS,
       project,
       projects: listProjects(),
@@ -283,8 +238,8 @@ async function handleApi(request: Request): Promise<Response> {
     try {
       const body = await readJson(request);
       const n = Number(body.max_iterations);
-      if (!Number.isFinite(n) || n < 1 || n > 100) {
-        return json({ error: "max_iterations must be a number between 1 and 100." }, 400);
+      if (!Number.isFinite(n) || n < 1 || n > MAX_MAX_ITERATIONS) {
+        return json({ error: `max_iterations must be a number between 1 and ${MAX_MAX_ITERATIONS}.` }, 400);
       }
       setMaxIterationsForUser(auth.user.id, Math.floor(n));
       return json({ max_iterations: getMaxIterationsForUser(auth.user.id) ?? DEFAULT_MAX_ITERATIONS });
@@ -303,6 +258,23 @@ async function handleApi(request: Request): Promise<Response> {
         return json({ error: `Unknown model '${model}'. Available: ${ALLOWED_MODELS.join(", ")}` }, 400);
       }
       return json({ model });
+    } catch (err) {
+      return errorResponse(err);
+    }
+  }
+
+  if (path === "/api/thinking" && method === "POST") {
+    const auth = requireAuth(request);
+    if (auth instanceof Response) return auth;
+    try {
+      const body = await readJson(request);
+      const effort = String(body.thinking_effort ?? "").trim();
+      if (!setThinkingEffortForUser(auth.user.id, effort)) {
+        return json({
+          error: `Unknown thinking effort '${effort}'. Available: ${THINKING_EFFORTS.map((e) => e || "auto").join(", ")}`,
+        }, 400);
+      }
+      return json({ thinking_effort: getThinkingEffortForUser(auth.user.id) });
     } catch (err) {
       return errorResponse(err);
     }
@@ -410,8 +382,8 @@ async function handleApi(request: Request): Promise<Response> {
         task,
         String(body.name ?? "subagent"),
         Number.isFinite(Number(body.max_iterations))
-          ? Math.min(Math.max(Math.floor(Number(body.max_iterations)), 1), 100)
-          : DEFAULT_SUBAGENT_MAX_ITERATIONS,
+          ? Math.min(Math.max(Math.floor(Number(body.max_iterations)), 1), MAX_MAX_ITERATIONS)
+          : undefined,
         getEffectiveWorkspace(auth.user.id),
       );
       return json({ subagent: statusOf(record) }, 201);
@@ -634,10 +606,12 @@ async function handleApi(request: Request): Promise<Response> {
       const projectId = getActiveProjectId(auth.user.id) ?? 0;
       const model = getEffectiveModel(auth.user.id, projectId || null);
       const workspace = getEffectiveWorkspace(auth.user.id, projectId || null);
+      const maxIterations = getMaxIterationsForUser(auth.user.id) ?? DEFAULT_MAX_ITERATIONS;
+      const thinkingEffort = getThinkingEffortForUser(auth.user.id);
       const stream = new ReadableStream({
         start(controller) {
           const encoder = new TextEncoder();
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "start" })}\n\n`));
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "start", max_iterations: maxIterations })}\n\n`));
 
           // Load this user's persistent conversation for the active project;
           // runAgent appends the new task and mutates the array as it goes.
@@ -649,8 +623,9 @@ async function handleApi(request: Request): Promise<Response> {
             controller.enqueue(encoder.encode(`data: ${data}\n\n`));
           }, {
             model,
-            maxIterations: getMaxIterationsForUser(auth.user.id) ?? undefined,
+            maxIterations,
             workspace,
+            thinkingEffort,
           }).then((result) => {
             // Append only the messages produced by this run; earlier history
             // rows are never rewritten or deleted.

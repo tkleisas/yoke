@@ -214,6 +214,39 @@
     .tool-call .error { color: var(--error-text); margin-top: 0.3rem; font-weight: 500; }
     .tool-call .result.good { color: var(--text); }
     .tool-call .result .mark { font-weight: 700; }
+    .tool-call .pending-note { color: var(--muted); font-size: 0.75rem; margin-top: 0.3rem; }
+
+    /* ---------- Thinking (reasoning) block ---------- */
+    .thinking {
+      align-self: flex-start;
+      max-width: min(780px, 92%);
+      width: 100%;
+      background: var(--tool-bg);
+      border: 1px solid var(--border);
+      border-left: 3px solid #a78bfa;
+      border-radius: 8px;
+      padding: 0.4rem 0.7rem;
+      font-size: 0.8rem;
+    }
+    .thinking summary { cursor: pointer; font-weight: 600; color: var(--muted); }
+    .thinking-text {
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      white-space: pre-wrap;
+      word-break: break-all;
+      color: var(--muted);
+      margin-top: 0.3rem;
+    }
+
+    /* ---------- Iteration indicator ---------- */
+    .iteration-pill {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 0.35rem 0.75rem;
+      font-size: 0.8rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
 
     .msg.error {
       align-self: flex-start;
@@ -420,6 +453,7 @@
     <button id="btn-edit-project" class="icon-btn project-btn" title="Edit project working directory" hidden>✎</button>
     <button id="btn-new-project" class="icon-btn project-btn" title="Create project" hidden>＋</button>
     <select id="model-select" title="Agent model" hidden></select>
+    <select id="effort-select" title="Thinking effort" hidden></select>
     <button id="dark-toggle" class="icon-btn" title="Toggle dark mode">🌙</button>
     <span id="user-badge" class="user-badge" hidden></span>
     <button id="btn-logout" class="icon-btn" hidden>Log out</button>
@@ -525,6 +559,7 @@
 
       <div id="composer">
         <textarea id="task" rows="2" placeholder="Ask Yoke to do something, or type /help for commands..."></textarea>
+        <span id="iteration-status" class="iteration-pill" hidden></span>
         <div class="composer-actions">
           <button id="run" class="send-btn">▶ Send</button>
           <button id="clear" class="icon-btn">Clear</button>
@@ -540,6 +575,9 @@
     const taskInput = document.getElementById('task');
     const runBtn = document.getElementById('run');
     const clearBtn = document.getElementById('clear');
+    const effortSelect = document.getElementById('effort-select');
+    const iterationStatus = document.getElementById('iteration-status');
+    const EFFORT_LABELS = { '': 'auto', low: 'low', medium: 'medium', high: 'high' };
 
     let auth = JSON.parse(localStorage.getItem(AUTH_KEY) || 'null');
     let running = false;
@@ -590,6 +628,7 @@
       projectSelect.hidden = !loggedIn;
       updateProjectButtons();
       modelSelect.hidden = !loggedIn || modelSelect.options.length < 2;
+      effortSelect.hidden = !loggedIn;
       if (loggedIn) {
         document.getElementById('user-badge').textContent = `👤 ${auth.user.username}`;
       }
@@ -654,6 +693,9 @@
         if (!res.ok) return;
         const data = await res.json();
         if (data.models && data.model) populateModels(data.models, data.model);
+        if (data.thinking_efforts && data.thinking_effort !== undefined) {
+          populateThinkingEfforts(data.thinking_efforts, data.thinking_effort);
+        }
         if (data.projects) populateProjects(data.projects, data.project && data.project.id);
         if (data.workspace) lastWorkspace = data.workspace;
       } catch { /* ignore */ }
@@ -713,7 +755,7 @@
       scrollToBottom();
     }
 
-    function addToolCall(step, action, args, result, error) {
+    function addToolCall(step, action, args, result, error, running) {
       const div = document.createElement('div');
       div.className = 'tool-call';
       const title = document.createElement('div');
@@ -731,6 +773,11 @@
         errDiv.className = 'error';
         errDiv.textContent = `❌ ${error}`;
         div.appendChild(errDiv);
+      } else if (running) {
+        const note = document.createElement('div');
+        note.className = 'pending-note';
+        note.textContent = '⏳ Running… (may wait for approval)';
+        div.appendChild(note);
       } else if (result !== undefined) {
         const resultDiv = document.createElement('div');
         resultDiv.className = 'result good';
@@ -740,6 +787,25 @@
       }
 
       conversation.appendChild(div);
+      scrollToBottom();
+      return div;
+    }
+
+    function updateToolCallCard(card, result, error) {
+      const note = card.querySelector('.pending-note');
+      if (note) note.remove();
+      if (error) {
+        const errDiv = document.createElement('div');
+        errDiv.className = 'error';
+        errDiv.textContent = `❌ ${error}`;
+        card.appendChild(errDiv);
+      } else if (result !== undefined) {
+        const resultDiv = document.createElement('div');
+        resultDiv.className = 'result good';
+        const resultStr = typeof result === 'object' ? JSON.stringify(result, null, 2) : String(result);
+        resultDiv.textContent = resultStr;
+        card.appendChild(resultDiv);
+      }
       scrollToBottom();
     }
 
@@ -757,6 +823,56 @@
       runBtn.disabled = isRunning;
       runBtn.textContent = isRunning ? '⏳ Working...' : '▶ Send';
       taskInput.disabled = isRunning;
+    }
+
+    /* ---------- Live streaming state ---------- */
+    let streamingBubble = null;   // live assistant bubble while deltas arrive
+    let streamingBuffer = '';
+    let thinkingBlock = null;     // collapsible <details> for reasoning
+    let pendingToolCard = null;   // tool card awaiting its step result
+    let maxIterations = 0;        // max iterations for the active run
+
+    function showIteration(n) {
+      if (!maxIterations) { iterationStatus.hidden = true; return; }
+      iterationStatus.hidden = false;
+      iterationStatus.textContent = `⚙️ Iteration ${n} / ${maxIterations}`;
+    }
+
+    function ensureStreamingBubble() {
+      if (!streamingBubble) {
+        streamingBubble = document.createElement('div');
+        streamingBubble.className = 'msg assistant';
+        conversation.appendChild(streamingBubble);
+      }
+      return streamingBubble;
+    }
+
+    function ensureThinkingBlock() {
+      if (!thinkingBlock) {
+        const details = document.createElement('details');
+        details.className = 'thinking';
+        details.open = true;
+        const summary = document.createElement('summary');
+        summary.textContent = '🧠 Thinking…';
+        const text = document.createElement('div');
+        text.className = 'thinking-text';
+        details.appendChild(summary);
+        details.appendChild(text);
+        conversation.appendChild(details);
+        thinkingBlock = details;
+        scrollToBottom();
+      }
+      return thinkingBlock;
+    }
+
+    function finalizeStreaming() {
+      streamingBubble = null;
+      streamingBuffer = '';
+      if (thinkingBlock) {
+        thinkingBlock.querySelector('summary').textContent = '🧠 Thinking';
+        thinkingBlock.open = false;
+      }
+      thinkingBlock = null;
     }
 
     async function sendTask() {
@@ -809,6 +925,7 @@
         const decoder = new TextDecoder();
         let buffer = '';
         let assistantRendered = false;
+        maxIterations = 0;
 
         while (true) {
           const { done, value } = await reader.read();
@@ -826,20 +943,52 @@
             } catch { continue; }
 
             if (parsed.type === 'start') {
+              maxIterations = parsed.max_iterations || 0;
               addSystemMessage('🚀 Yoke engaged...');
+            } else if (parsed.type === 'tool_start') {
+              showIteration(parsed.step);
+              pendingToolCard = addToolCall(parsed.step, parsed.action, parsed.args || {}, null, null, true);
             } else if (parsed.type === 'step') {
-              addToolCall(parsed.step, parsed.action, parsed.args, parsed.result, parsed.error);
+              showIteration(parsed.step);
+              if (pendingToolCard) {
+                updateToolCallCard(pendingToolCard, parsed.result, parsed.error);
+                pendingToolCard = null;
+              } else {
+                addToolCall(parsed.step, parsed.action, parsed.args, parsed.result, parsed.error);
+              }
+            } else if (parsed.type === 'delta') {
+              streamingBuffer += parsed.content;
+              ensureStreamingBubble().innerHTML = renderMarkdown(streamingBuffer);
+              scrollToBottom();
+            } else if (parsed.type === 'reasoning') {
+              const block = ensureThinkingBlock();
+              block.querySelector('.thinking-text').textContent += parsed.content;
+              scrollToBottom();
             } else if (parsed.type === 'usage') {
               addSystemMessage(`🧾 Tokens: ${parsed.promptTokens.toLocaleString()} in / ${parsed.completionTokens.toLocaleString()} out (${parsed.totalTokens.toLocaleString()} total)`);
             } else if (parsed.type === 'finish') {
-              addAssistant(parsed.finalAnswer);
+              if (streamingBubble) {
+                streamingBubble.innerHTML = renderMarkdown(parsed.finalAnswer);
+                finalizeStreaming();
+              } else {
+                addAssistant(parsed.finalAnswer);
+              }
               assistantRendered = true;
+              iterationStatus.hidden = true;
+              if (thinkingBlock) {
+                thinkingBlock.querySelector('summary').textContent = '🧠 Thinking';
+                thinkingBlock.open = false;
+              }
             } else if (parsed.type === 'error') {
               addError(parsed.error);
+              finalizeStreaming();
+              iterationStatus.hidden = true;
             }
           }
         }
 
+        iterationStatus.hidden = true;
+        pendingToolCard = null;
         if (!assistantRendered) {
           addSystemMessage('Run finished.');
         }
@@ -854,6 +1003,11 @@
     clearBtn.addEventListener('click', () => {
       conversation.innerHTML = '';
       addSystemMessage('Conversation cleared.');
+      finalizeStreaming();
+      streamingBubble = null;
+      thinkingBlock = null;
+      pendingToolCard = null;
+      iterationStatus.hidden = true;
     });
 
     /* ---------- Index & search ---------- */
@@ -1128,7 +1282,8 @@
       ['/summarize', 'Replace agent context with an LLM summary of the conversation'],
       ['/usage', 'Show context size and token usage'],
       ['/model [name]', 'Show models or switch the model (e.g. /model deepseek-chat)'],
-      ['/maxtries [n]', 'Show or set the max agent iterations (1-100, default 10)'],
+      ['/thinking [auto|low|medium|high]', 'Show or set the reasoning/thinking effort (auto = provider default)'],
+      ['/maxtries [n]', 'Show or set the max agent iterations (1-30000, default 10)'],
       ['/reindex', 'Reindex the workspace'],
       ['/search <query>', 'Search indexed symbols and files'],
       ['/web <query>', 'Search the web'],
@@ -1750,6 +1905,40 @@
       }
     });
 
+    /* ---------- Thinking effort selection ---------- */
+    function populateThinkingEfforts(efforts, current) {
+      effortSelect.innerHTML = '';
+      for (const e of efforts || ['', 'low', 'medium', 'high']) {
+        const opt = document.createElement('option');
+        opt.value = e;
+        opt.textContent = EFFORT_LABELS[e] || e;
+        opt.selected = e === current;
+        effortSelect.appendChild(opt);
+      }
+      effortSelect.hidden = false;
+    }
+
+    effortSelect.addEventListener('change', async () => {
+      const effort = effortSelect.value;
+      const previous = effortSelect.dataset.prev || effort;
+      effortSelect.dataset.prev = effort;
+      try {
+        const res = await fetch('/api/thinking', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({ thinking_effort: effort }),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || `HTTP ${res.status}`);
+        }
+        addSystemMessage(`Thinking effort set to ${EFFORT_LABELS[effort] || effort}.`);
+      } catch (err) {
+        effortSelect.value = previous;
+        addError(`Failed to set thinking effort: ${err.message}`);
+      }
+    });
+
     function applyModelCommand(arg) {
       if (!arg) {
         const models = Array.from(modelSelect.options).map((o) => o.value);
@@ -1802,6 +1991,7 @@
           `- **Project:** ${data.project ? `\`${data.project.name}\`` : 'default workspace'}\n` +
           `- **Workspace:** \`${data.workspace}\`\n` +
           `- **Model:** \`${data.model}\`\n` +
+          `- **Thinking effort:** \`${EFFORT_LABELS[data.thinking_effort] || data.thinking_effort || 'auto'}\`\n` +
           `- **Max iterations:** ${data.max_iterations}\n` +
           `- **Theme:** \`${document.documentElement.dataset.theme}\`\n` +
           `- **Indexed files:** ${data.index.files}\n` +
@@ -1881,10 +2071,30 @@
         case 'model':
           applyModelCommand(arg);
           break;
+        case 'thinking': {
+          const choice = (arg || '').trim().toLowerCase();
+          if (!choice) {
+            try {
+              const st = await fetch('/api/status', { headers: authHeaders() }).then((r) => r.json());
+              addAssistant(`**Thinking effort:** \`${EFFORT_LABELS[st.thinking_effort] || st.thinking_effort || 'auto'}\``);
+            } catch (err) {
+              addError(`Failed to read thinking effort: ${err.message}`);
+            }
+            break;
+          }
+          const value = choice === 'auto' ? '' : choice;
+          if (!(value in EFFORT_LABELS)) {
+            addError('Usage: /thinking <auto|low|medium|high>');
+            break;
+          }
+          effortSelect.value = value;
+          effortSelect.dispatchEvent(new Event('change'));
+          break;
+        }
         case 'maxtries': {
           const n = arg ? parseInt(arg, 10) : null;
-          if (n !== null && (isNaN(n) || n < 1 || n > 100)) {
-            addError('Usage: /maxtries <1-100>');
+          if (n !== null && (isNaN(n) || n < 1 || n > 30000)) {
+            addError('Usage: /maxtries <1-30000>');
             break;
           }
           await setMaxTries(n);

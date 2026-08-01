@@ -5,6 +5,22 @@ All notable changes to Yoke are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-08-01
+
+### Added
+
+- **Token streaming** — the agent's reply now streams into the chat as it is
+  generated, including a collapsible thinking block for reasoning content.
+  Tool calls appear instantly and update as they complete.
+- **Thinking effort** — per-user `reasoning_effort` selection
+  (`auto`/`low`/`medium`/`high`) via a header dropdown, `/thinking`, or
+  `POST /api/thinking`.
+- **Local shell commands** — new `run_command` agent tool that executes
+  commands in the workspace (approved from the web UI).
+- **Iteration indicator** — the UI shows the current agent iteration
+  (`⚙️ Iteration N / M`) during a run.
+- **Higher iteration limits** — max agent iterations raised to 30,000.
+
 ## [0.1.0] - 2026-07-31
 
 First release.
