@@ -132,15 +132,27 @@ Open the printed URL (e.g. https://localhost:8080) and log in.
 
 ## Creating users
 
-Users are created only via the CLI — there is no registration in the UI or API:
+Users are created only via the CLI — there is no registration in the UI or API.
+Point `DATABASE_PATH` at the same database file the server uses.
+
+**With the released binary:**
+
+```
+# Linux / macOS
+DATABASE_PATH=/path/to/yoke.db ./yoke create-user <username> <password>
+
+# Windows (PowerShell)
+$env:DATABASE_PATH="C:\path\to\yoke.db"; .\yoke.exe create-user <username> <password>
+```
+
+**From source:**
 
 ```
 deno run --allow-env --allow-read --allow-write create-user.ts <username> <password>
 ```
 
 Usernames must be at least 3 characters and passwords at least 8. The command
-fails if the username already exists. Point `DATABASE_PATH` at the same
-database file the server uses.
+fails if the username already exists. `yoke version` prints the version.
 
 ## Projects
 

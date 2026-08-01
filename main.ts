@@ -5,7 +5,7 @@ import { db } from "./db.ts";
 import { runAgent, summarizeConversation, SYSTEM_PROMPT, type AgentEvent, type ChatMessage, DEFAULT_MAX_ITERATIONS, MAX_MAX_ITERATIONS } from "./agent.ts";
 import { ensureWorkspace, hasRunPermission, runShellCommand, SHELL_TIMEOUT_MS, workspacePath } from "./tools.ts";
 import { loadOrCreateTls } from "./certs.ts";
-import { AuthError, cleanupExpiredSessions, extractToken, getUserByToken, loginUser, logoutSession, type AuthUser } from "./auth.ts";
+import { AuthError, cleanupExpiredSessions, createUser, extractToken, getUserByToken, loginUser, logoutSession, type AuthUser } from "./auth.ts";
 import { indexWorkspace, indexStats, searchSymbols, searchFiles } from "./index.ts";
 import { appendConversation, archiveAllActive, compactConversation, conversationStats, estimateTokens, getConversation, getHistory, getMaxIterationsForUser, recordUsage, resetConversation, restoreConversation, setMaxIterationsForUser, usageSummary } from "./context.ts";
 import { ALLOWED_MODELS, getModelForUser, setModelForUser, THINKING_EFFORTS, getThinkingEffortForUser, setThinkingEffortForUser } from "./models.ts";
@@ -22,6 +22,30 @@ import {
 import appConfig from "./deno.json" with { type: "json" };
 
 const APP_VERSION: string = (appConfig as { version?: string }).version ?? "0.0.0";
+
+// ===== CLI subcommands (also available in the released binary) =====
+//   yoke create-user <username> <password>
+//   yoke version
+const [subcommand, ...subArgs] = Deno.args;
+if (subcommand === "create-user") {
+  const [username, password] = subArgs;
+  if (!username || !password) {
+    console.error("Usage: yoke create-user <username> <password>");
+    Deno.exit(1);
+  }
+  try {
+    const user = await createUser(username, password);
+    console.log(`Created user '${user.username}' (id ${user.id}).`);
+    Deno.exit(0);
+  } catch (err) {
+    console.error(`Failed to create user: ${err instanceof Error ? err.message : String(err)}`);
+    Deno.exit(1);
+  }
+}
+if (subcommand === "version") {
+  console.log(APP_VERSION);
+  Deno.exit(0);
+}
 
 function errString(err: unknown): string {
   if (err instanceof Error) return err.message;
