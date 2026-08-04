@@ -331,8 +331,9 @@ const TOOLS = [
 // ===== Local implementations =====
 // Every tool implementation receives (args, workspace, ctx) — the work
 // directory of the current project (or the default workspace), plus the
-// requesting user id (for approval checks).
-type ToolContext = { userId?: number };
+// requesting user id (for approval checks) and the run's abort signal (so
+// waits and shell commands stop promptly when the user stops the run).
+type ToolContext = { userId?: number; signal?: AbortSignal };
 const TOOL_IMPLEMENTATIONS: Record<string, (args: any, workspace: string, ctx: ToolContext) => Promise<unknown>> = {
   read_file: (args, ws) => readFileTool(args.path, ws),
   write_file: (args, ws) => writeFileTool(args.path, args.content, ws),
@@ -345,11 +346,11 @@ const TOOL_IMPLEMENTATIONS: Record<string, (args: any, workspace: string, ctx: T
       return { error: "Shell execution requires Deno run permission. Restart Yoke with the --allow-run flag." };
     }
     const label = `[local] ${command}`;
-    if (!isAlwaysApproved(label) && !await createApproval(label, "agent", ctx.userId)) {
+    if (!isAlwaysApproved(label) && !await createApproval(label, "agent", ctx.userId, ctx.signal)) {
       return { error: "Command was not approved (denied, or the approval prompt expired)." };
     }
     const timeoutSeconds = clampInt(Number(args.timeout_seconds), 15, 1, 3600);
-    return await runShellCommand(command, ws, timeoutSeconds * 1000);
+    return await runShellCommand(command, ws, timeoutSeconds * 1000, ctx.signal);
   },
   spawn_subagent: async (args, ws, ctx) => {
     const record = spawnSubagent(
@@ -358,6 +359,7 @@ const TOOL_IMPLEMENTATIONS: Record<string, (args: any, workspace: string, ctx: T
       clampInt(Number(args.max_iterations), DEFAULT_SUBAGENT_MAX_ITERATIONS, 1, MAX_MAX_ITERATIONS),
       ws,
       ctx.userId,
+      ctx.signal,
     );
     return { id: record.id, name: record.name, status: record.status };
   },
@@ -366,11 +368,11 @@ const TOOL_IMPLEMENTATIONS: Record<string, (args: any, workspace: string, ctx: T
     if (!record) return { error: `Unknown subagent id '${args.id}'` };
     return statusOf(record);
   },
-  wait_subagent: async (args) => {
+  wait_subagent: async (args, ws, ctx) => {
     const record = getSubagent(String(args.id ?? ""));
     if (!record) return { error: `Unknown subagent id '${args.id}'` };
     const timeoutSeconds = Math.min(Math.max(Number(args.timeout_seconds) || 30, 1), 120);
-    const waited = await waitForSubagent(record.id, timeoutSeconds * 1000);
+    const waited = await waitForSubagent(record.id, timeoutSeconds * 1000, ctx.signal);
     return statusOf(waited);
   },
   list_subagents: async () => listSubagents().map(statusOf),
@@ -382,7 +384,7 @@ const TOOL_IMPLEMENTATIONS: Record<string, (args: any, workspace: string, ctx: T
     const command = String(args.command ?? "").trim();
     if (!command) return { error: "Missing 'command'." };
     const label = `[ssh ${host.name}] ${command}`;
-    if (!isAlwaysApproved(label) && !await createApproval(label, "agent", ctx.userId)) {
+    if (!isAlwaysApproved(label) && !await createApproval(label, "agent", ctx.userId, ctx.signal)) {
       return { error: "Command was not approved." };
     }
     return truncate(formatExecResult(await sshExec(host, command)));
@@ -400,7 +402,7 @@ const TOOL_IMPLEMENTATIONS: Record<string, (args: any, workspace: string, ctx: T
     if (!localPath || !remotePath) return { error: "local_path and remote_path are required." };
     const fullLocal = resolve(ws, localPath);
     const label = `[upload to ${host.name}] ${localPath} -> ${remotePath}`;
-    if (!isAlwaysApproved(label) && !await createApproval(label, "agent", ctx.userId)) {
+    if (!isAlwaysApproved(label) && !await createApproval(label, "agent", ctx.userId, ctx.signal)) {
       return { error: "Upload was not approved." };
     }
     const bytes = await sftpUploadFile(host, fullLocal, remotePath);
@@ -412,7 +414,7 @@ const TOOL_IMPLEMENTATIONS: Record<string, (args: any, workspace: string, ctx: T
     const remotePath = String(args.remote_path ?? "").trim();
     if (!remotePath) return { error: "Missing 'remote_path'." };
     const label = `[fetch from ${host.name}] ${remotePath}`;
-    if (!isAlwaysApproved(label) && !await createApproval(label, "agent", ctx.userId)) {
+    if (!isAlwaysApproved(label) && !await createApproval(label, "agent", ctx.userId, ctx.signal)) {
       return { error: "Fetch was not approved." };
     }
     return truncate(await sftpReadFile(host, remotePath));
@@ -425,7 +427,7 @@ const TOOL_IMPLEMENTATIONS: Record<string, (args: any, workspace: string, ctx: T
     const remoteDir = remotePath || `${(await sshHomeDir(host)).replace(/[\\/]+$/, "")}/yoke-deploy/${projectName}`;
     const postDeploy = args.post_deploy ? String(args.post_deploy).trim() : undefined;
     const label = `[deploy to ${host.name}] ${projectName} -> ${remoteDir}`;
-    if (!isAlwaysApproved(label) && !await createApproval(label, "agent", ctx.userId)) {
+    if (!isAlwaysApproved(label) && !await createApproval(label, "agent", ctx.userId, ctx.signal)) {
       return { error: "Deploy was not approved." };
     }
     return await sshDeploy(host, ws, remoteDir, postDeploy);
@@ -674,6 +676,12 @@ export async function runAgent(
     // tool_call_id. The API rejects an assistant tool_calls message unless
     // every tool_call_id is answered by a tool message.
     for (const toolCall of toolCalls) {
+      // Stop dispatching on abort; still answer the remaining tool_call_ids
+      // so the saved conversation keeps valid assistant/tool pairing.
+      if (options.signal?.aborted) {
+        messages.push({ role: "tool", content: "(stopped)", tool_call_id: toolCall.id });
+        continue;
+      }
       const name = toolCall.function.name;
       let args: Record<string, unknown> = {};
       let error: string | undefined;
@@ -694,7 +702,7 @@ export async function runAgent(
           error = `Unknown tool: ${name}`;
         } else {
           try {
-            result = await impl(args, workspace, { userId: options.userId });
+            result = await impl(args, workspace, { userId: options.userId, signal: options.signal });
           } catch (err) {
             error = errString(err);
           }

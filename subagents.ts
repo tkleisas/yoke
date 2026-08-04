@@ -78,6 +78,7 @@ export function spawnSubagent(
   maxIterations: number = DEFAULT_SUBAGENT_MAX_ITERATIONS,
   workspace?: string,
   userId?: number,
+  signal?: AbortSignal,
 ): SubagentRecord {
   if (subagents.size >= MAX_CONCURRENT) {
     throw new Error(`Too many running subagents (max ${MAX_CONCURRENT}).`);
@@ -99,7 +100,7 @@ export function spawnSubagent(
     if (event.type === "step") record.steps++;
     else if (event.type === "finish") record.result = event.finalAnswer;
     else if (event.type === "error" && !record.error) record.error = event.error;
-  }, { maxIterations, workspace, userId, ...subagentInheritedOptions(userId) }).then(({ usage }) => {
+  }, { maxIterations, workspace, userId, signal, ...subagentInheritedOptions(userId) }).then(({ usage }) => {
     record.usage = usage;
     record.status = record.error ? "error" : "done";
     record.finishedAt = Date.now();
@@ -114,24 +115,35 @@ export function spawnSubagent(
   return record;
 }
 
-export async function waitForSubagent(id: string, timeoutMs: number): Promise<SubagentRecord> {
+export async function waitForSubagent(id: string, timeoutMs: number, signal?: AbortSignal): Promise<SubagentRecord> {
   const record = subagents.get(id);
   if (!record) throw new Error(`Unknown subagent id '${id}'.`);
+  if (signal?.aborted) throw signal.reason ?? new Error("aborted");
   if (record.status !== "running") return record;
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const entry = {
       resolve,
       timer: setTimeout(() => {
         const list = waiters.get(id) ?? [];
         const index = list.indexOf(entry);
         if (index >= 0) list.splice(index, 1);
+        signal?.removeEventListener("abort", onAbort);
         resolve(subagents.get(id)!);
       }, timeoutMs),
+    };
+    // Stopping the run rejects the wait instead of waiting out the timeout.
+    const onAbort = () => {
+      clearTimeout(entry.timer);
+      const list = waiters.get(id) ?? [];
+      const index = list.indexOf(entry);
+      if (index >= 0) list.splice(index, 1);
+      reject(signal!.reason ?? new Error("aborted"));
     };
     const list = waiters.get(id) ?? [];
     list.push(entry);
     waiters.set(id, list);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 

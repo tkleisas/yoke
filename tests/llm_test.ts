@@ -440,3 +440,59 @@ Deno.test("stream failure after a delta surfaces without retry", async () => {
     assertEquals(calls.length, 1);
   });
 });
+
+Deno.test("caller abort mid-stream rejects promptly with the abort reason", async () => {
+  // The body yields one chunk and then stays open forever, like a long
+  // generation; without abort plumbing the reader would hang until it ends.
+  const stub: FetchStub = () => {
+    let sent = false;
+    return new Response(
+      new ReadableStream({
+        pull(ctrl) {
+          if (!sent) {
+            sent = true;
+            ctrl.enqueue(new TextEncoder().encode(dataLines([{ choices: [{ delta: { content: "partial" } }] }])));
+          }
+          // never enqueues again: the stream stays open
+        },
+      }),
+      { status: 200 },
+    );
+  };
+  await withStubbedFetch("chat", stub, async (calls) => {
+    const ctrl = new AbortController();
+    const started = Date.now();
+    const err = await assertRejects(
+      () =>
+        callLLM({
+          messages: [{ role: "user", content: "hi" }],
+          model: "m",
+          stream: true,
+          signal: ctrl.signal,
+          onDelta: () => ctrl.abort(new Error("stopped by user")),
+        }),
+      Error,
+      "stopped by user",
+    );
+    // The abort reason must surface as-is, not wrapped in a stream error.
+    assertStringIncludes(err.message, "stopped by user");
+    assert(Date.now() - started < 2000, "abort should not wait for the stream to end");
+    assertEquals(calls.length, 1); // caller abort is never retried
+  });
+});
+
+Deno.test("caller abort during retry backoff rejects promptly", async () => {
+  const stub: FetchStub = () => new Response("slow down", { status: 429, headers: { "Retry-After": "30" } });
+  await withStubbedFetch("chat", stub, async (calls) => {
+    const ctrl = new AbortController();
+    setTimeout(() => ctrl.abort(new Error("stopped by user")), 20);
+    const started = Date.now();
+    await assertRejects(
+      () => callLLM({ messages: [{ role: "user", content: "hi" }], model: "m", signal: ctrl.signal }),
+      Error,
+      "stopped by user",
+    );
+    assert(Date.now() - started < 5000, "abort should interrupt the backoff sleep");
+    assertEquals(calls.length, 1); // caller abort is never retried
+  });
+});

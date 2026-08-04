@@ -5,6 +5,24 @@ All notable changes to Yoke are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-08-05
+
+### Fixed
+
+- **UI freezes during streaming** — the chat re-parsed and re-sanitized the
+  whole markdown buffer on every token (O(n²), caused browser "wait" dialogs
+  on long answers). Streaming renders are now throttled (~150ms) with a full
+  render on finish, and auto-scroll no longer yanks the view when scrolled up.
+- **Stop button reliability** — aborting mid-stream now actually cancels the
+  in-flight LLM request (the caller-abort listener was dropped after
+  connect); tool executions (shell, approvals, subagent waits) receive the
+  abort signal; the dispatch loop stops between tool calls; fixed a race
+  where `activeRuns` cleanup could delete a newer run's controller; stop
+  requests arriving before a run registers are remembered (30s); the Stop
+  button re-enables for repeated attempts and the client drops a stuck SSE
+  stream after 5s as a last resort. Spawned subagents share the parent's
+  abort signal.
+
 ## [0.6.0] - 2026-08-05
 
 ### Added

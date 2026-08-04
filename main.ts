@@ -101,6 +101,10 @@ function publicJob(job: ShellJob): Record<string, unknown> {
 
 // Active agent runs per user, so a run can be stopped from the UI.
 const activeRuns = new Map<number, AbortController>();
+// Stop requests that arrived before their run registered (timestamped, so a
+// stale marker cannot cancel a much later run).
+const stopRequestedAt = new Map<number, number>();
+const STOP_MARKER_TTL_MS = 30_000;
 
 type Auth = { token: string; user: AuthUser };
 
@@ -686,7 +690,12 @@ async function handleApi(request: Request): Promise<Response> {
     const auth = requireAuth(request);
     if (auth instanceof Response) return auth;
     const controller = activeRuns.get(auth.user.id);
-    if (!controller) return json({ error: "No active run to stop." }, 404);
+    if (!controller) {
+      // Stop can arrive before the run registers; remember it briefly so the
+      // /api/agent handler aborts the run as soon as it starts.
+      stopRequestedAt.set(auth.user.id, Date.now());
+      return json({ ok: true });
+    }
     controller.abort();
     return json({ ok: true });
   }
@@ -710,6 +719,10 @@ async function handleApi(request: Request): Promise<Response> {
       const thinkingEffort = getThinkingEffortForUser(auth.user.id);
       const abortController = new AbortController();
       activeRuns.set(auth.user.id, abortController);
+      // Honor a stop that arrived just before this run registered.
+      const stoppedAt = stopRequestedAt.get(auth.user.id);
+      stopRequestedAt.delete(auth.user.id);
+      if (stoppedAt && Date.now() - stoppedAt < STOP_MARKER_TTL_MS) abortController.abort();
       const stream = new ReadableStream({
         start(controller) {
           const encoder = new TextEncoder();
@@ -741,7 +754,11 @@ async function handleApi(request: Request): Promise<Response> {
             controller.enqueue(encoder.encode(`data: ${errorEvent}\n\n`));
             controller.close();
           }).finally(() => {
-            activeRuns.delete(auth.user.id);
+            // Only remove our own controller — a newer run may already have
+            // registered its own.
+            if (activeRuns.get(auth.user.id) === abortController) {
+              activeRuns.delete(auth.user.id);
+            }
           });
         }
       });

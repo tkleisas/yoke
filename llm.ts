@@ -135,11 +135,12 @@ function composeSignal(caller: AbortSignal | undefined, timeoutMs: number) {
     if (caller.aborted) ctrl.abort(caller.reason);
     else caller.addEventListener("abort", onCallerAbort, { once: true });
   }
+  const clearTimer = () => clearTimeout(timer);
   const clear = () => {
-    clearTimeout(timer);
+    clearTimer();
     caller?.removeEventListener("abort", onCallerAbort);
   };
-  return { signal: ctrl.signal, clear };
+  return { signal: ctrl.signal, clear, clearTimer };
 }
 
 function sleep(ms: number, caller?: AbortSignal): Promise<void> {
@@ -168,15 +169,15 @@ async function fetchOnce(
   init: RequestInit,
   cfg: LLMConfig,
   caller: AbortSignal | undefined,
-): Promise<{ response: Response; clear: () => void }> {
-  const { signal, clear } = composeSignal(caller, cfg.timeoutMs);
+): Promise<{ response: Response; clear: () => void; clearTimer: () => void }> {
+  const { signal, clear, clearTimer } = composeSignal(caller, cfg.timeoutMs);
   try {
     const response = await fetch(url, { ...init, signal });
     if (!response.ok) {
       const text = await response.text().catch(() => "");
       throw new HttpError(response.status, text, parseRetryAfter(response.headers.get("retry-after")));
     }
-    return { response, clear };
+    return { response, clear, clearTimer };
   } catch (err) {
     clear();
     throw err;
@@ -206,13 +207,18 @@ async function withRetry<T>(
 type SSEEvent = { event?: string; data: string };
 
 // Line-buffered SSE reader: yields one event per blank-line-terminated
-// block, ignores comments and malformed lines.
-async function* readSSE(body: ReadableStream<Uint8Array>): AsyncGenerator<SSEEvent> {
+// block, ignores comments and malformed lines. A caller abort cancels the
+// underlying reader (read() would otherwise hang on a slow stream) and the
+// abort reason is thrown instead of a stream error.
+async function* readSSE(body: ReadableStream<Uint8Array>, signal?: AbortSignal): AsyncGenerator<SSEEvent> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let eventName: string | undefined;
   let dataLines: string[] = [];
+
+  const onAbort = () => reader.cancel(signal!.reason ?? new Error("aborted")).catch(() => {});
+  if (signal && !signal.aborted) signal.addEventListener("abort", onAbort, { once: true });
 
   const flushEvent = (): SSEEvent | undefined => {
     if (dataLines.length === 0) {
@@ -241,7 +247,10 @@ async function* readSSE(body: ReadableStream<Uint8Array>): AsyncGenerator<SSEEve
 
   try {
     while (true) {
+      if (signal?.aborted) throw signal.reason ?? new Error("aborted");
       const { done, value } = await reader.read();
+      // reader.cancel() resolves read() with done — still surface the abort.
+      if (signal?.aborted) throw signal.reason ?? new Error("aborted");
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split("\n");
@@ -259,6 +268,7 @@ async function* readSSE(body: ReadableStream<Uint8Array>): AsyncGenerator<SSEEve
     const tail = flushEvent();
     if (tail) yield tail;
   } finally {
+    signal?.removeEventListener("abort", onAbort);
     reader.releaseLock();
   }
 }
@@ -334,13 +344,15 @@ function parseChatCompletion(data: any): LLMResult {
 async function parseChatStream(
   body: ReadableStream<Uint8Array>,
   onDelta: (content: string, reasoning: string) => void,
+  signal?: AbortSignal,
 ): Promise<LLMResult> {
   let content = "";
   let reasoning = "";
   const toolCalls: LLMToolCall[] = [];
   let usage: LLMUsage | undefined;
 
-  for await (const ev of readSSE(body)) {
+  for await (const ev of readSSE(body, signal)) {
+    if (signal?.aborted) throw signal.reason ?? new Error("aborted");
     if (ev.data === "[DONE]") continue;
     const json = parseJSON(ev.data);
     if (!json) continue;
@@ -455,6 +467,7 @@ function parseResponsesResult(data: any): LLMResult {
 async function parseResponsesStream(
   body: ReadableStream<Uint8Array>,
   onDelta: (content: string, reasoning: string) => void,
+  signal?: AbortSignal,
 ): Promise<LLMResult> {
   let content = "";
   let reasoning = "";
@@ -463,7 +476,8 @@ async function parseResponsesStream(
   // deno-lint-ignore no-explicit-any
   let completed: any;
 
-  for await (const ev of readSSE(body)) {
+  for await (const ev of readSSE(body, signal)) {
+    if (signal?.aborted) throw signal.reason ?? new Error("aborted");
     const json = parseJSON(ev.data);
     if (!json) continue;
     const type = json.type ?? ev.event;
@@ -598,6 +612,7 @@ function parseAnthropicResult(data: any): LLMResult {
 async function parseAnthropicStream(
   body: ReadableStream<Uint8Array>,
   onDelta: (content: string, reasoning: string) => void,
+  signal?: AbortSignal,
 ): Promise<LLMResult> {
   let content = "";
   let reasoning = "";
@@ -607,7 +622,8 @@ async function parseAnthropicStream(
   let outputTokens = 0;
   let sawUsage = false;
 
-  for await (const ev of readSSE(body)) {
+  for await (const ev of readSSE(body, signal)) {
+    if (signal?.aborted) throw signal.reason ?? new Error("aborted");
     const json = parseJSON(ev.data);
     if (!json) continue;
     const type = json.type ?? ev.event;
@@ -682,6 +698,7 @@ export async function callLLM(opts: CallLLMOptions): Promise<LLMResult> {
   let parseStream: (
     body: ReadableStream<Uint8Array>,
     onDelta: (content: string, reasoning: string) => void,
+    signal?: AbortSignal,
   ) => Promise<LLMResult>;
 
   if (cfg.format === "responses") {
@@ -730,15 +747,23 @@ export async function callLLM(opts: CallLLMOptions): Promise<LLMResult> {
   };
 
   return await withRetry(cfg, opts.signal, async () => {
-    const { response, clear } = await fetchOnce(url, init, cfg, opts.signal);
-    clear(); // for streaming the timeout covers the connect only
-    if (!response.body) throw new Error("DeepSeek stream had no body");
+    const { response, clear, clearTimer } = await fetchOnce(url, init, cfg, opts.signal);
+    // The timeout covers the connect only — but the caller-abort listener
+    // must stay live until the body is fully consumed, so a stop mid-stream
+    // still aborts the in-flight fetch and unblocks the reader.
+    clearTimer();
+    if (!response.body) {
+      clear();
+      throw new Error("DeepSeek stream had no body");
+    }
     try {
-      return await parseStream(response.body, onDelta);
+      return await parseStream(response.body, onDelta, opts.signal);
     } catch (err) {
-      if (opts.signal?.aborted) throw err;
+      if (opts.signal?.aborted) throw opts.signal.reason ?? err;
       const prefix = deltaDelivered ? "LLM stream interrupted after partial output" : "LLM stream failed";
       throw new StreamError(`${prefix}: ${errString(err)}`);
+    } finally {
+      clear();
     }
   }, (err) => {
     if (err instanceof StreamError) return !deltaDelivered;

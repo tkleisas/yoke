@@ -36,14 +36,17 @@ export function listPendingApprovals(): PendingApproval[] {
   }));
 }
 
-export function createApproval(command: string, requester: string, userId?: number): Promise<boolean> {
+export function createApproval(command: string, requester: string, userId?: number, signal?: AbortSignal): Promise<boolean> {
   if (userId !== undefined && isYoloEnabled(userId)) {
     return Promise.resolve(true);
   }
+  // An already-stopped run never waits for approval.
+  if (signal?.aborted) return Promise.resolve(false);
   return new Promise((resolve) => {
     const id = `appr-${nextId++}`;
     const resolveEntry = (approved: boolean) => {
       pending.delete(id);
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
       resolve(approved);
     };
     const entry: Entry = {
@@ -54,7 +57,14 @@ export function createApproval(command: string, requester: string, userId?: numb
       timer: setTimeout(() => resolveEntry(false), APPROVAL_TIMEOUT_MS),
       resolve: resolveEntry,
     };
+    // Stopping the run denies the pending approval instead of waiting out
+    // the full timeout.
+    const onAbort = () => {
+      clearTimeout(entry.timer);
+      resolveEntry(false);
+    };
     pending.set(id, entry);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 

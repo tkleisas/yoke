@@ -863,11 +863,33 @@
       stopBtn.disabled = false;
     }
 
+    let agentFetchCtrl = null;  // AbortController for the active /api/agent fetch
+    let stopRequested = false;  // user clicked Stop during the active fetch
+
     stopBtn.addEventListener('click', async () => {
       stopBtn.disabled = true;
+      stopBtn.textContent = '⏳ Stopping...';
+      stopRequested = true;
+      // Last resort: if the SSE stream is still open after a grace period,
+      // drop the local reader so the UI always recovers. The server-side
+      // stop marker still cancels the run itself.
+      setTimeout(() => {
+        if (stopRequested && running && agentFetchCtrl) agentFetchCtrl.abort();
+      }, 5000);
       try {
-        await fetch('/api/agent/stop', { method: 'POST', headers: authHeaders() });
-      } catch { /* server restarted etc. — the SSE stream will end */ }
+        const res = await fetch('/api/agent/stop', { method: 'POST', headers: authHeaders() });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          addError(`Stop failed: ${data.error || `HTTP ${res.status}`}`);
+        }
+      } catch {
+        addError('Stop request failed (network error) — detaching locally.');
+        if (agentFetchCtrl) agentFetchCtrl.abort();
+      } finally {
+        // Re-enable so a stuck run can be stopped with repeated attempts.
+        stopBtn.disabled = false;
+        stopBtn.textContent = '⏹ Stop';
+      }
     });
 
     /* ---------- Live streaming state ---------- */
@@ -876,6 +898,39 @@
     let thinkingBlock = null;     // collapsible <details> for reasoning
     let pendingToolCard = null;   // tool card awaiting its step result
     let maxIterations = 0;        // max iterations for the active run
+    let streamRenderTimer = null; // throttle timer for streaming re-renders
+    let pendingReasoning = '';    // reasoning deltas not yet flushed to the DOM
+
+    // Re-parsing + sanitizing the whole markdown buffer per token is O(n²)
+    // and freezes the UI on long outputs, so streaming renders are throttled
+    // to one full render per interval; the finish event does a final render.
+    const STREAM_RENDER_MS = 150;
+
+    function nearBottom() {
+      return conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight < 100;
+    }
+
+    function flushStreamRender() {
+      if (streamRenderTimer) {
+        clearTimeout(streamRenderTimer);
+        streamRenderTimer = null;
+      }
+      if (thinkingBlock && pendingReasoning) {
+        thinkingBlock.querySelector('.thinking-text').textContent += pendingReasoning;
+        pendingReasoning = '';
+      }
+      if (streamingBubble) streamingBubble.innerHTML = renderMarkdown(streamingBuffer);
+      // Don't yank the view if the user scrolled up to read.
+      if (nearBottom()) scrollToBottom();
+    }
+
+    function scheduleStreamRender() {
+      if (streamRenderTimer) return;
+      streamRenderTimer = setTimeout(() => {
+        streamRenderTimer = null;
+        flushStreamRender();
+      }, STREAM_RENDER_MS);
+    }
 
     function showIteration(n) {
       if (!maxIterations) { iterationStatus.hidden = true; return; }
@@ -911,8 +966,13 @@
     }
 
     function finalizeStreaming() {
+      if (streamRenderTimer) {
+        clearTimeout(streamRenderTimer);
+        streamRenderTimer = null;
+      }
       streamingBubble = null;
       streamingBuffer = '';
+      pendingReasoning = '';
       if (thinkingBlock) {
         thinkingBlock.querySelector('summary').textContent = '🧠 Thinking';
         thinkingBlock.open = false;
@@ -948,6 +1008,8 @@
 
       addUserMessage(task);
       setRunning(true);
+      stopRequested = false;
+      agentFetchCtrl = new AbortController();
       // Approval cards must render while the agent waits for permission on
       // tools like run_command and remote_exec.
       startApprovalPolling();
@@ -957,6 +1019,7 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...authHeaders() },
           body: JSON.stringify({ task }),
+          signal: agentFetchCtrl.signal,
         });
 
         if (response.status === 401) {
@@ -1008,15 +1071,16 @@
               }
             } else if (parsed.type === 'delta') {
               streamingBuffer += parsed.content;
-              ensureStreamingBubble().innerHTML = renderMarkdown(streamingBuffer);
-              scrollToBottom();
+              ensureStreamingBubble();
+              scheduleStreamRender();
             } else if (parsed.type === 'reasoning') {
-              const block = ensureThinkingBlock();
-              block.querySelector('.thinking-text').textContent += parsed.content;
-              scrollToBottom();
+              ensureThinkingBlock();
+              pendingReasoning += parsed.content;
+              scheduleStreamRender();
             } else if (parsed.type === 'usage') {
               addSystemMessage(`🧾 Tokens: ${parsed.promptTokens.toLocaleString()} in / ${parsed.completionTokens.toLocaleString()} out (${parsed.totalTokens.toLocaleString()} total)`);
             } else if (parsed.type === 'finish') {
+              flushStreamRender(); // apply pending deltas/reasoning first
               if (streamingBubble) {
                 streamingBubble.innerHTML = renderMarkdown(parsed.finalAnswer);
                 finalizeStreaming();
@@ -1030,10 +1094,12 @@
                 thinkingBlock.open = false;
               }
             } else if (parsed.type === 'cancelled') {
+              flushStreamRender();
               runCancelled = true;
               iterationStatus.hidden = true;
               addSystemMessage('⏹ Run stopped.');
             } else if (parsed.type === 'error') {
+              flushStreamRender();
               addError(parsed.error);
               finalizeStreaming();
               iterationStatus.hidden = true;
@@ -1043,12 +1109,20 @@
 
         iterationStatus.hidden = true;
         pendingToolCard = null;
+        flushStreamRender(); // flush anything still throttled when the stream ends
         if (!assistantRendered && !runCancelled) {
           addSystemMessage('Run finished.');
         }
       } catch (err) {
-        addError(`Network error: ${err.message}`);
+        if (stopRequested) {
+          // Local fallback abort: the server may still finish in background.
+          addSystemMessage('⏹ Run stopped.');
+        } else {
+          addError(`Network error: ${err.message}`);
+        }
       } finally {
+        stopRequested = false;
+        agentFetchCtrl = null;
         setRunning(false);
         taskInput.focus();
         await pollApprovals();

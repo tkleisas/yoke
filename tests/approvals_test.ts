@@ -1,5 +1,5 @@
 // tests/approvals_test.ts
-import { assertEquals, assertFalse } from "jsr:@std/assert";
+import { assert, assertEquals, assertFalse } from "jsr:@std/assert";
 import { createApproval, isAlwaysApproved, listPendingApprovals, respondApproval } from "../approvals.ts";
 
 Deno.test("createApproval registers a pending approval", async () => {
@@ -38,4 +38,22 @@ Deno.test("responding twice or to an unknown id fails", async () => {
   await promise;
   assertEquals(respondApproval(id, true, false), false);
   assertEquals(respondApproval("does-not-exist", true, false), false);
+});
+
+Deno.test("aborting the signal denies the approval promptly", async () => {
+  const ctrl = new AbortController();
+  const promise = createApproval("rm -rf /tmp/x", "alice", undefined, ctrl.signal);
+  assertEquals(listPendingApprovals().length, 1);
+  const started = Date.now();
+  ctrl.abort();
+  assertEquals(await promise, false);
+  assert(Date.now() - started < 1000, "abort should not wait out the approval timeout");
+  assertEquals(listPendingApprovals().length, 0);
+});
+
+Deno.test("an already-aborted signal denies immediately without registering", async () => {
+  const ctrl = new AbortController();
+  ctrl.abort();
+  assertEquals(await createApproval("cmd-d", "alice", undefined, ctrl.signal), false);
+  assertEquals(listPendingApprovals().length, 0);
 });
