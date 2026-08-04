@@ -5,6 +5,41 @@ All notable changes to Yoke are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-08-05
+
+### Added
+
+- **Docker images** — `Dockerfile` with two flavors (`yoke:slim`, `yoke:full`
+  with build toolchains), `docker-compose.yml`, and
+  `scripts/docker-build.sh`. The agent's shell commands run inside the
+  container; the workspace is bind-mounted and the database/TLS certs persist
+  in a volume.
+- **Multiple LLM API formats** — `LLM_API_FORMAT` selects the wire format:
+  `chat` (OpenAI chat completions, default), `responses` (OpenAI Responses
+  API, `deepseek-v4-flash` only), or `anthropic` (Anthropic messages API).
+  Message/tool-call conversion happens in the new `llm.ts` provider layer.
+- **LLM request resilience** — all LLM calls retry transient failures
+  (network errors, 408/409/425/429, 5xx; `Retry-After` honored) with
+  full-jitter exponential backoff, and have request timeouts. Tunable via
+  `DEEPSEEK_MAX_RETRIES`, `DEEPSEEK_RETRY_BASE_MS`, `DEEPSEEK_RETRY_MAX_MS`,
+  `DEEPSEEK_TIMEOUT_MS`. Streaming calls retry only before the first delta.
+- **SSH connection pooling + retries** — connections are pooled per host
+  config and reused across exec/status/SFTP operations (status checks now
+  share one connection). Transient transport errors retry with exponential
+  backoff (`SSH_MAX_RETRIES`, `SSH_RETRY_BASE_MS`); auth failures are never
+  retried. SFTP operations have timeouts (`SFTP_TIMEOUT_MS`) instead of
+  hanging forever.
+
+### Fixed
+
+- **Shell timeout kills the process tree** — on Linux/macOS commands run via
+  `setsid` and a timeout/stop signals the whole process group, so background
+  grandchildren (e.g. servers started by a command) no longer survive.
+- **Project deletion** — `deleteProject` no longer throws on migrated
+  databases (it deleted from the dropped `conversations` table).
+- **Subagents inherit model settings** — spawned subagents now use the
+  parent's effective model (project pin included) and thinking effort.
+
 ## [0.5.0] - 2026-08-01
 
 ### Added

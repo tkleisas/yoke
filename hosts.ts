@@ -22,6 +22,74 @@ export type Host = {
 
 const SSH_TIMEOUT_MS = 60_000;
 const MAX_OUTPUT_CHARS = 50_000;
+const RETRY_DELAY_CAP_MS = 10_000;
+const POOL_IDLE_MS = 5 * 60_000;
+
+function envInt(name: string, fallback: number): number {
+  const raw = Deno.env.get(name);
+  if (!raw) return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
+}
+
+// Read lazily so tests can inject small values via the environment.
+function sshMaxRetries(): number {
+  return envInt("SSH_MAX_RETRIES", 3);
+}
+function sshRetryBaseMs(): number {
+  return envInt("SSH_RETRY_BASE_MS", 500);
+}
+function sftpTimeoutMs(): number {
+  return envInt("SFTP_TIMEOUT_MS", 120_000);
+}
+
+// Failures that retrying cannot fix: bad credentials, unreadable keys, and
+// command-level timeouts (a hung command is not a transport failure).
+const NON_RETRYABLE_PATTERNS = [
+  /all configured authentication methods failed/i,
+  /cannot read ssh key/i,
+  /command timed out/i,
+];
+
+const RETRYABLE_PATTERNS = [
+  /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|EHOSTUNREACH|ENETUNREACH|ENETDOWN/i,
+  /timed out while waiting for handshake/i,
+  /\bconnection\b/i,
+  /\bchannel\b/i,
+  /\bsocket\b/i,
+];
+
+/** True for transient transport errors worth retrying; false for auth
+ * failures, unreadable keys, and command timeouts. */
+export function isRetryableSshError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (NON_RETRYABLE_PATTERNS.some((re) => re.test(msg))) return false;
+  return RETRYABLE_PATTERNS.some((re) => re.test(msg));
+}
+
+/** Exponential backoff with jitter: base * 2^attempt, capped at 10s. */
+export function sshRetryDelayMs(attempt: number, baseMs = sshRetryBaseMs()): number {
+  const exp = Math.min(baseMs * 2 ** attempt, RETRY_DELAY_CAP_MS);
+  return Math.round(exp / 2 + Math.random() * (exp / 2));
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Rejects if `op` does not settle within `ms`; the underlying op is not
+ * cancelled, so callers drop the connection on timeout. */
+export function withTimeout<T>(op: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s.`)), ms);
+  });
+  return Promise.race([op, timeout]).finally(() => clearTimeout(timer));
+}
+
+function isTimeoutError(err: unknown): boolean {
+  return err instanceof Error && err.message.includes("timed out after");
+}
 
 function rowToHost(row: {
   id: number;
@@ -170,6 +238,87 @@ export function deleteHost(id: number): boolean {
 
 // ===== SSH operations =====
 
+// ----- connection pool -----
+// Ready clients are cached by connection config (not host id) so editing a
+// host's address/credentials naturally yields a fresh connection. Idle
+// entries are dropped by a lazy sweep on acquire — no timers to leak.
+
+type PoolEntry = { client: Client; lastUsed: number };
+const sshPool = new Map<string, PoolEntry>();
+
+function poolKey(host: Host): string {
+  return [host.host, host.port, host.user, host.auth_type, host.key_path, host.password].join("\n");
+}
+
+function evictSshEntry(key: string, client?: Client): void {
+  const entry = sshPool.get(key);
+  if (!entry) return;
+  if (client && entry.client !== client) return;
+  sshPool.delete(key);
+  try {
+    entry.client.end();
+  } catch {
+    // already closed
+  }
+}
+
+/** Drains every pooled connection (test teardown, shutdown). */
+export function closeSshPool(): void {
+  for (const key of [...sshPool.keys()]) evictSshEntry(key);
+}
+
+/** Runs `op`, retrying transient transport failures with exponential
+ * backoff. The pooled connection is evicted before each retry so the next
+ * attempt reconnects. */
+async function withSshRetry<T>(host: Host, op: () => Promise<T>): Promise<T> {
+  const maxRetries = sshMaxRetries();
+  let retries = 0;
+  for (;;) {
+    try {
+      return await op();
+    } catch (err) {
+      if (retries >= maxRetries || !isRetryableSshError(err)) throw err;
+      evictSshEntry(poolKey(host));
+      await sleep(sshRetryDelayMs(retries));
+      retries++;
+    }
+  }
+}
+
+async function acquireSsh(host: Host): Promise<Client> {
+  const now = Date.now();
+  // Lazy sweep of connections idle longer than POOL_IDLE_MS.
+  for (const [key, entry] of [...sshPool]) {
+    if (now - entry.lastUsed > POOL_IDLE_MS) evictSshEntry(key);
+  }
+  const key = poolKey(host);
+  const pooled = sshPool.get(key);
+  if (pooled) {
+    pooled.lastUsed = now;
+    return pooled.client;
+  }
+  // No retry here — callers wrap acquireSsh in withSshRetry, and nesting
+  // two retry loops would multiply the attempt count.
+  const client = await connectSsh(host);
+  // A concurrent acquire may have pooled a connection meanwhile — reuse it.
+  const raced = sshPool.get(key);
+  if (raced) {
+    raced.lastUsed = Date.now();
+    try {
+      client.end();
+    } catch {
+      // ignore
+    }
+    return raced.client;
+  }
+  sshPool.set(key, { client, lastUsed: Date.now() });
+  // Evict on transport-level death so the next op reconnects.
+  const onDead = () => evictSshEntry(key, client);
+  client.on("close", onDead);
+  client.on("error", onDead);
+  return client;
+}
+
 function connectSsh(host: Host): Promise<Client> {
   return new Promise((resolve, reject) => {
     const client = new Client();
@@ -220,6 +369,45 @@ function sudoPasswordFor(host: Host): string {
   return host.sudo_password || (host.auth_type === "password" ? host.password : "");
 }
 
+function execOnClient(
+  client: Client,
+  execCommand: string,
+  sudoPassword: string | undefined,
+  timeoutMs: number,
+): Promise<ExecResult> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        reject(new Error(`Command timed out after ${Math.round(timeoutMs / 1000)}s.`));
+      }
+    }, timeoutMs);
+    try {
+      client.exec(execCommand, (err, stream) => {
+        if (err) {
+          if (!settled) { settled = true; clearTimeout(timer); reject(err); }
+          return;
+        }
+        if (sudoPassword !== undefined) stream.write(`${sudoPassword}\n`);
+        let stdout = "";
+        let stderr = "";
+        stream.on("close", (code: number | undefined) => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            resolve({ code: code ?? -1, stdout, stderr });
+          }
+        });
+        stream.on("data", (d: string | Uint8Array) => { stdout += d.toString(); });
+        stream.stderr.on("data", (d: string | Uint8Array) => { stderr += d.toString(); });
+      });
+    } catch (err) {
+      if (!settled) { settled = true; clearTimeout(timer); reject(err); }
+    }
+  });
+}
+
 export async function sshExec(host: Host, command: string, timeoutMs = SSH_TIMEOUT_MS): Promise<ExecResult> {
   // sudo handling: run "sudo -S <cmd>" and feed the password via stdin so it
   // never appears in the command string, process list, or approval cards.
@@ -239,37 +427,16 @@ export async function sshExec(host: Host, command: string, timeoutMs = SSH_TIMEO
     execCommand = `sudo -S ${inner}`;
   }
 
-  const client = await connectSsh(host);
-
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        client.end();
-        reject(new Error(`Command timed out after ${Math.round(timeoutMs / 1000)}s.`));
-      }
-    }, timeoutMs);
-    client.exec(execCommand, (err, stream) => {
-      if (err) {
-        if (!settled) { settled = true; clearTimeout(timer); client.end(); reject(err); }
-        return;
-      }
-      if (sudoPassword !== undefined) stream.write(`${sudoPassword}\n`);
-      let stdout = "";
-      let stderr = "";
-      stream.on("close", (code: number | undefined) => {
-        if (!settled) {
-          settled = true;
-          clearTimeout(timer);
-          client.end();
-          resolve({ code: code ?? -1, stdout, stderr });
-        }
-      });
-      stream.on("data", (d: string | Uint8Array) => { stdout += d.toString(); });
-      stream.stderr.on("data", (d: string | Uint8Array) => { stderr += d.toString(); });
+  try {
+    return await withSshRetry(host, async () => {
+      const client = await acquireSsh(host);
+      return await execOnClient(client, execCommand, sudoPassword, timeoutMs);
     });
-  });
+  } catch (err) {
+    // A timed-out command may leave a wedged channel; drop the connection.
+    if (isTimeoutError(err)) evictSshEntry(poolKey(host));
+    throw err;
+  }
 }
 
 export async function sshStatus(host: Host): Promise<string> {
@@ -313,30 +480,39 @@ function getSftp(client: Client): Promise<SFTPWrapper> {
   });
 }
 
-export async function sftpReadFile(host: Host, remotePath: string): Promise<string> {
-  const client = await connectSsh(host);
+/** Runs an SFTP operation on a pooled connection with retries and a timeout
+ * on session init; individual transfers add their own timeouts. */
+async function withSftp<T>(host: Host, op: (sftp: SFTPWrapper) => Promise<T>): Promise<T> {
   try {
-    const sftp = await getSftp(client);
-    return await new Promise<string>((resolve, reject) => {
-      sftp.readFile(remotePath, "utf8", (err, data) => {
-        if (err) reject(err);
-        else resolve(String(data ?? ""));
-      });
+    return await withSshRetry(host, async () => {
+      const client = await acquireSsh(host);
+      const sftp = await withTimeout(getSftp(client), sftpTimeoutMs(), "SFTP session init");
+      return await op(sftp);
     });
-  } finally {
-    client.end();
+  } catch (err) {
+    // A timed-out transfer can leave a wedged channel; drop the connection.
+    if (isTimeoutError(err)) evictSshEntry(poolKey(host));
+    throw err;
   }
 }
 
+export async function sftpReadFile(host: Host, remotePath: string): Promise<string> {
+  return await withSftp(host, (sftp) =>
+    withTimeout(
+      sftpPromise<string>((cb) => sftp.readFile(remotePath, "utf8", (err, data) => cb(err, String(data ?? "")))),
+      sftpTimeoutMs(),
+      `SFTP read of ${remotePath}`,
+    ));
+}
+
 export async function sftpUploadFile(host: Host, localPath: string, remotePath: string): Promise<number> {
-  const client = await connectSsh(host);
-  try {
-    const sftp = await getSftp(client);
-    await sftpPromise((cb) => sftp.fastPut(localPath, remotePath, cb));
-    return Deno.statSync(localPath).size;
-  } finally {
-    client.end();
-  }
+  await withSftp(host, (sftp) =>
+    withTimeout(
+      sftpPromise((cb) => sftp.fastPut(localPath, remotePath, cb)),
+      sftpTimeoutMs(),
+      `SFTP upload of ${remotePath}`,
+    ));
+  return Deno.statSync(localPath).size;
 }
 
 async function mkdirp(sftp: SFTPWrapper, path: string): Promise<void> {
@@ -345,9 +521,10 @@ async function mkdirp(sftp: SFTPWrapper, path: string): Promise<void> {
   for (const part of parts) {
     current = `${current}/${part}`;
     try {
-      await sftpPromise((cb) => sftp.mkdir(current, cb));
-    } catch {
+      await withTimeout(sftpPromise((cb) => sftp.mkdir(current, cb)), sftpTimeoutMs(), `SFTP mkdir ${current}`);
+    } catch (err) {
       // directory already exists
+      if (isTimeoutError(err)) throw err;
     }
   }
 }
@@ -357,9 +534,7 @@ export async function sftpUploadDir(
   localDir: string,
   remoteDir: string,
 ): Promise<{ files: number; bytes: number }> {
-  const client = await connectSsh(host);
-  try {
-    const sftp = await getSftp(client);
+  return await withSftp(host, async (sftp) => {
     await mkdirp(sftp, remoteDir);
 
     let files = 0;
@@ -371,12 +546,18 @@ export async function sftpUploadDir(
         const localPath = resolve(current.local, entry.name);
         const remotePath = `${current.remote}/${entry.name}`;
         if (entry.isDirectory) {
-          await sftpPromise((cb) => sftp.mkdir(remotePath, cb)).catch(() => {
-            // directory may already exist
-          });
+          await withTimeout(sftpPromise((cb) => sftp.mkdir(remotePath, cb)), sftpTimeoutMs(), `SFTP mkdir ${remotePath}`)
+            .catch((err) => {
+              // directory may already exist
+              if (isTimeoutError(err)) throw err;
+            });
           stack.push({ local: localPath, remote: remotePath });
         } else if (entry.isFile) {
-          await sftpPromise((cb) => sftp.fastPut(localPath, remotePath, cb));
+          await withTimeout(
+            sftpPromise((cb) => sftp.fastPut(localPath, remotePath, cb)),
+            sftpTimeoutMs(),
+            `SFTP upload of ${remotePath}`,
+          );
           const stat = Deno.statSync(localPath);
           bytes += stat.size;
           files++;
@@ -384,9 +565,7 @@ export async function sftpUploadDir(
       }
     }
     return { files, bytes };
-  } finally {
-    client.end();
-  }
+  });
 }
 
 export async function sshDeploy(

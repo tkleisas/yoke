@@ -75,6 +75,23 @@ export function hasRunPermission(): boolean {
   }
 }
 
+// On Linux/macOS the shell is started via setsid so it leads its own process
+// group/session; a timeout or stop can then signal the whole group, killing
+// grandchildren (e.g. a server started by the command) instead of just the
+// direct shell PID. Cached so the probe runs once per process.
+let setsidAvailable: boolean | null = null;
+function hasSetsid(): boolean {
+  if (setsidAvailable === null) {
+    try {
+      new Deno.Command("setsid", { args: ["true"], stdout: "null", stderr: "null" }).outputSync();
+      setsidAvailable = true;
+    } catch {
+      setsidAvailable = false; // missing (e.g. macOS) or no run permission
+    }
+  }
+  return setsidAvailable;
+}
+
 export async function runShellCommand(
   command: string,
   cwd = workspacePath,
@@ -90,8 +107,11 @@ export async function runShellCommand(
   const wrapped = IS_WINDOWS
     ? `${command} > "${outPath}" 2> "${errPath}"`
     : `${command} > '${outPath}' 2> '${errPath}'`;
-  const child = new Deno.Command(shell, {
-    args: [IS_WINDOWS ? "/c" : "-c", wrapped],
+  const useSetsid = !IS_WINDOWS && hasSetsid();
+  // setsid execs the shell in a new session; the shell keeps the spawned PID,
+  // which then equals its process-group ID. Exit codes propagate unchanged.
+  const child = new Deno.Command(useSetsid ? "setsid" : shell, {
+    args: useSetsid ? [shell, "-c", wrapped] : [IS_WINDOWS ? "/c" : "-c", wrapped],
     cwd,
     stdout: "null",
     stderr: "null",
@@ -99,9 +119,32 @@ export async function runShellCommand(
 
   let timedOut = false;
   const kill = () => {
+    if (IS_WINDOWS) {
+      try {
+        Deno.kill(child.pid, "SIGTERM");
+      } catch {
+        // process already gone
+      }
+      return;
+    }
+    if (useSetsid) {
+      // Deno.kill can't signal a process group (no negative PIDs), so shell
+      // out to kill(1). util-linux kill(1) rejects `kill -KILL -<pid>`
+      // ("failed to parse argument") — it needs `-s KILL -- -<pgid>`.
+      try {
+        new Deno.Command("kill", {
+          args: ["-s", "KILL", "--", `-${child.pid}`],
+          stdout: "null",
+          stderr: "null",
+        }).outputSync();
+      } catch {
+        // group already gone
+      }
+    }
+    // Belt and braces: also kill the direct PID (the only option without
+    // setsid; with setsid the group signal above normally suffices).
     try {
-      if (IS_WINDOWS) Deno.kill(child.pid, "SIGTERM");
-      else Deno.kill(child.pid, "SIGKILL");
+      Deno.kill(child.pid, "SIGKILL");
     } catch {
       // process already gone
     }

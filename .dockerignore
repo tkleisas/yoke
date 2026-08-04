@@ -1,0 +1,10 @@
+.git
+.github
+tests
+.test-data
+yoke.db
+certs
+workspace
+*.log
+.env
+.env.*

@@ -6,6 +6,7 @@ import { fetchWebPage, searchWeb } from "./web.ts";
 import { createApproval, isAlwaysApproved } from "./approvals.ts";
 import { formatExecResult, getHostByName, sftpReadFile, sftpUploadFile, sshDeploy, sshExec, sshHomeDir, sshStatus, truncate } from "./hosts.ts";
 import { getSubagent, listSubagents, spawnSubagent, statusOf, waitForSubagent } from "./subagents.ts";
+import { callLLM } from "./llm.ts";
 
 // ===== Types =====
 export type AgentEvent =
@@ -47,7 +48,6 @@ function errString(err: unknown): string {
 }
 
 const DEEPSEEK_API_KEY = Deno.env.get("DEEPSEEK_API_KEY");
-const DEEPSEEK_BASE_URL = Deno.env.get("DEEPSEEK_BASE_URL") || "https://api.deepseek.com/v1";
 const DEEPSEEK_MODEL = Deno.env.get("DEEPSEEK_MODEL") || "deepseek-v4-flash";
 const MAX_TOOL_RESULT_CHARS = 25000;
 
@@ -448,123 +448,42 @@ async function callDeepSeek(
     return mockReasoning(messages);
   }
 
-  const body: Record<string, unknown> = {
-    model,
+  const result = await callLLM({
     messages,
     tools: TOOLS,
-    tool_choice: "auto",
+    toolChoice: "auto",
+    model,
     temperature: 0.2,
-  };
-  // OpenAI-compatible "reasoning effort" knob; "auto" (unset) sends nothing so
-  // the provider uses its default. Only sent when the user picked one.
-  if (thinkingEffort) body.reasoning_effort = thinkingEffort;
-
-  if (!onDelta) {
-    const response = await fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${DEEPSEEK_API_KEY}`,
-      },
-      body: JSON.stringify(body),
-      signal,
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`DeepSeek API error: ${response.status} - ${errorText}`);
-    }
-
-    const data = await response.json();
-    const choice = data.choices?.[0];
-    if (!choice) throw new Error("No choice from DeepSeek");
-
-    const usage: ApiUsage | undefined = data.usage;
-    const message = choice.message;
-    if (message.tool_calls && message.tool_calls.length > 0) {
-      return { toolCalls: message.tool_calls, usage };
-    } else {
-      return { finishAnswer: message.content || "", usage };
-    }
-  }
-
-  // Streaming: emit deltas as they arrive and accumulate the full message.
-  const response = await fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${DEEPSEEK_API_KEY}`,
-    },
-    body: JSON.stringify({ ...body, stream: true, stream_options: { include_usage: true } }),
+    reasoningEffort: thinkingEffort,
+    stream: !!onDelta,
+    onDelta: onDelta
+      ? (content, reasoning) => {
+        if (content) onDelta("delta", content);
+        if (reasoning) onDelta("reasoning", reasoning);
+      }
+      : undefined,
     signal,
   });
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`DeepSeek API error: ${response.status} - ${errorText}`);
-  }
-
-  const reader = response.body!.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let content = "";
-  const toolCalls: ToolCall[] = [];
-  let usage: ApiUsage | undefined;
-
-  const flush = (chunk: string) => {
-    buffer += chunk;
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("data:")) continue;
-      const payload = trimmed.slice(5).trim();
-      if (payload === "[DONE]") continue;
-      let json: {
-        usage?: ApiUsage;
-        choices?: Array<{ delta?: { content?: string; reasoning_content?: string; reasoning?: string; tool_calls?: Array<{
-          index?: number;
-          id?: string;
-          function?: { name?: string; arguments?: string };
-        }> } }>;
-      };
-      try {
-        json = JSON.parse(payload);
-      } catch {
-        continue; // partial line — wait for the next chunk
-      }
-      if (json.usage) usage = json.usage;
-      const delta = json.choices?.[0]?.delta;
-      if (!delta) continue;
-      const reasoning = delta.reasoning_content ?? delta.reasoning;
-      if (reasoning) onDelta("reasoning", reasoning);
-      if (delta.content) {
-        content += delta.content;
-        onDelta("delta", delta.content);
-      }
-      if (delta.tool_calls) {
-        for (const tc of delta.tool_calls) {
-          const index = tc.index ?? 0;
-          toolCalls[index] ??= { id: "", type: "function", function: { name: "", arguments: "" } };
-          if (tc.id) toolCalls[index].id = tc.id;
-          if (tc.function?.name) toolCalls[index].function.name += tc.function.name;
-          if (tc.function?.arguments) toolCalls[index].function.arguments += tc.function.arguments;
-        }
-      }
+  const usage: ApiUsage | undefined = result.usage
+    ? {
+      prompt_tokens: result.usage.promptTokens,
+      completion_tokens: result.usage.completionTokens,
+      total_tokens: result.usage.totalTokens,
     }
-  };
+    : undefined;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    flush(decoder.decode(value, { stream: true }));
+  if (result.toolCalls.length > 0) {
+    return {
+      toolCalls: result.toolCalls.map((tc) => ({
+        id: tc.id,
+        type: "function" as const,
+        function: { name: tc.name, arguments: tc.arguments },
+      })),
+      usage,
+    };
   }
-
-  const completeCalls = toolCalls.filter((tc) => tc.id && tc.function.name);
-  if (completeCalls.length > 0) {
-    return { toolCalls: completeCalls, usage };
-  }
-  return { finishAnswer: content, usage };
+  return { finishAnswer: result.content, usage };
 }
 
 // ===== Conversation summarization (EXPORTED) =====
@@ -593,33 +512,18 @@ export async function summarizeConversation(
 
   const prompt = `Summarize this conversation between a user and a coding assistant. Preserve the user's goals, key findings, file paths, symbols, and any pending or outstanding tasks. Keep it concise but complete.\n\n${transcript}\n\nSummary:`;
 
-  const response = await fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${DEEPSEEK_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.2,
-    }),
+  const result = await callLLM({
+    messages: [{ role: "user", content: prompt }],
+    model,
+    temperature: 0.2,
   });
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`DeepSeek API error: ${response.status} - ${errorText}`);
-  }
-
-  const data = await response.json();
-  const summary = data.choices?.[0]?.message?.content || "";
-  const usage: ApiUsage = data.usage;
   return {
-    summary,
+    summary: result.content,
     usage: {
-      promptTokens: usage?.prompt_tokens ?? 0,
-      completionTokens: usage?.completion_tokens ?? 0,
-      totalTokens: usage?.total_tokens ?? 0,
+      promptTokens: result.usage?.promptTokens ?? 0,
+      completionTokens: result.usage?.completionTokens ?? 0,
+      totalTokens: result.usage?.totalTokens ?? 0,
     },
   };
 }

@@ -41,6 +41,7 @@ declare module "npm:ssh2@1.16.0" {
   export class Client {
     on(event: "ready", listener: () => void): this;
     on(event: "error", listener: (err: Error) => void): this;
+    on(event: "close", listener: () => void): this;
     connect(config: ConnectConfig): void;
     end(): void;
     exec(command: string, callback: (err: Error | undefined, stream: ClientChannel) => void): void;
@@ -67,6 +68,7 @@ declare module "npm:ssh2@1.16.0" {
     on(event: "authentication", listener: (ctx: AuthContext) => void): this;
     on(event: "ready", listener: () => void): this;
     on(event: "session", listener: (accept: () => Session) => void): this;
+    end(): void;
   }
 
   export class Server {

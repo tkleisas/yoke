@@ -2,6 +2,8 @@
 // In-process registry of background subagents. Each subagent runs its own
 // isolated agent loop (runAgent) with a fresh conversation.
 import { DEFAULT_SUBAGENT_MAX_ITERATIONS, runAgent, SYSTEM_PROMPT, type AgentEvent, type AgentUsage, type ChatMessage } from "./agent.ts";
+import { getThinkingEffortForUser } from "./models.ts";
+import { getEffectiveModel } from "./projects.ts";
 
 export type SubagentStatus = "running" | "done" | "error";
 
@@ -59,6 +61,17 @@ function notifyDone(id: string): void {
   }
 }
 
+/**
+ * Model and thinking effort a subagent inherits from the parent's context:
+ * the user's effective model (project pin overrides user choice) and their
+ * reasoning effort. Without a user there is nothing to inherit and the
+ * subagent falls back to runAgent's defaults.
+ */
+export function subagentInheritedOptions(userId?: number): { model?: string; thinkingEffort?: string } {
+  if (userId == null) return {};
+  return { model: getEffectiveModel(userId), thinkingEffort: getThinkingEffortForUser(userId) };
+}
+
 export function spawnSubagent(
   task: string,
   name = "subagent",
@@ -86,7 +99,7 @@ export function spawnSubagent(
     if (event.type === "step") record.steps++;
     else if (event.type === "finish") record.result = event.finalAnswer;
     else if (event.type === "error" && !record.error) record.error = event.error;
-  }, { maxIterations, workspace, userId }).then(({ usage }) => {
+  }, { maxIterations, workspace, userId, ...subagentInheritedOptions(userId) }).then(({ usage }) => {
     record.usage = usage;
     record.status = record.error ? "error" : "done";
     record.finishedAt = Date.now();

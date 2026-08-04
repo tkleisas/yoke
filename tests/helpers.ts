@@ -5,7 +5,7 @@
 // IMPORTANT: this file must be the FIRST import in any test file that uses
 // the database, so table truncation runs before other modules load.
 /// <reference path="../types/ssh2.d.ts" />
-import { Server } from "npm:ssh2@1.16.0";
+import { Server, type Connection } from "npm:ssh2@1.16.0";
 import SFTPStream from "npm:ssh2@1.16.0/lib/protocol/SFTP.js";
 import { Buffer } from "node:buffer";
 import { dirname } from "https://deno.land/std@0.224.0/path/mod.ts";
@@ -29,6 +29,26 @@ export const TEST_SUDO_PASSWORD = "testpass";
 
 let serverState: { port: number; store: string; server: Server } | null = null;
 
+// Connection instrumentation: lets tests verify pool reuse and eviction.
+let connectionCount = 0;
+const activeConnections: Connection[] = [];
+
+/** Number of SSH connections the fixture server has accepted so far. */
+export function sshConnectionCount(): number {
+  return connectionCount;
+}
+
+/** Ends all server-side connections (simulates a server/network drop). */
+export function dropSshConnections(): void {
+  for (const conn of activeConnections.splice(0)) {
+    try {
+      conn.end();
+    } catch {
+      // already closed
+    }
+  }
+}
+
 /** Starts (or reuses) an in-process SSH server listening on 127.0.0.1. */
 export async function startSshServer(): Promise<{ port: number }> {
   if (serverState) return { port: serverState.port };
@@ -39,6 +59,8 @@ export async function startSshServer(): Promise<{ port: number }> {
   const openFiles = new Map<string, Uint8Array>();
 
   const server = new Server({ hostKeys: [hostKey] }, (client) => {
+    connectionCount++;
+    activeConnections.push(client);
     client.on("authentication", (ctx) => {
       if (
         ctx.method === "password" &&

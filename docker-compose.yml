@@ -1,0 +1,30 @@
+services:
+  yoke:
+    build:
+      context: .
+      target: full
+    image: yoke:full
+    ports:
+      - "8080:8080"
+    environment:
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}
+      DEEPSEEK_MODELS: ${DEEPSEEK_MODELS:-}
+      LLM_API_FORMAT: ${LLM_API_FORMAT:-chat}
+      MAX_ITERATIONS: ${MAX_ITERATIONS:-100}
+      APPROVAL_TIMEOUT_MINUTES: ${APPROVAL_TIMEOUT_MINUTES:-5}
+      ENABLE_HTTPS: ${ENABLE_HTTPS:-0}
+      TLS_CERT_PATH: /data/cert.pem
+      TLS_KEY_PATH: /data/key.pem
+      WORKSPACE_DIR: /workspace
+      DATABASE_PATH: /data/yoke.db
+    volumes:
+      # Host code the agent works on — builds run inside the container.
+      - ./workspace:/workspace
+      # Persistent database + TLS certificates.
+      - yoke-data:/data
+    restart: unless-stopped
+
+volumes:
+  yoke-data:

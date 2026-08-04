@@ -1,6 +1,6 @@
 // web.ts
 // Web access for the agent: fetch a page as markdown-ish text, or search
-// the web (DuckDuckGo HTML endpoint — no API key required).
+// the web (Bing RSS endpoint — no API key required).
 
 const MAX_WEB_CONTENT_CHARS = 20_000;
 const WEB_TIMEOUT_MS = 15_000;

@@ -1,10 +1,10 @@
 // tests/hosts_test.ts
 // Integration tests for remote-host management against an in-process SSH server.
 import { assertEquals, assertRejects, assertThrows } from "jsr:@std/assert";
-import { makeDeploySource, startSshServer, TEST_PASSWORD, TEST_SUDO_PASSWORD, TEST_USER } from "./helpers.ts";
+import { makeDeploySource, startSshServer, stopSshServer, TEST_PASSWORD, TEST_SUDO_PASSWORD, TEST_USER } from "./helpers.ts";
 import {
-  createHost, deleteHost, getHost, getHostByName, listHosts, sftpReadFile, sftpUploadDir, sftpUploadFile,
-  sshDeploy, sshExec, sshHomeDir, sshStatus, updateHost,
+  closeSshPool, createHost, deleteHost, getHost, getHostByName, listHosts, sftpReadFile, sftpUploadDir,
+  sftpUploadFile, sshDeploy, sshExec, sshHomeDir, sshStatus, updateHost,
 } from "../hosts.ts";
 import { resolve } from "https://deno.land/std@0.224.0/path/mod.ts";
 
@@ -178,6 +178,11 @@ sshTest("integration: full lifecycle against live SSH server", async () => {
   assertEquals(back.includes('"port"'), true);
   deleteHost(host.id);
   await Deno.remove(src, { recursive: true });
+});
+
+sshTest("teardown: drain pool and stop server", async () => {
+  closeSshPool();
+  await stopSshServer();
 });
 
 

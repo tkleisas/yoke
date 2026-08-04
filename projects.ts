@@ -87,7 +87,7 @@ export function deleteProject(id: number): boolean {
   const exists = db.prepare("SELECT id FROM projects WHERE id = ?").get(id);
   if (!exists) return false;
   db.prepare("UPDATE users SET project_id = NULL WHERE project_id = ?").run(id);
-  db.prepare("DELETE FROM conversations WHERE project_id = ?").run(id);
+  db.prepare("DELETE FROM messages WHERE project_id = ?").run(id);
   db.prepare("DELETE FROM projects WHERE id = ?").run(id);
   return true;
 }

@@ -67,6 +67,11 @@ git tag v0.1.0 && git push origin v0.1.0
 | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com/v1` | API base URL. |
 | `DEEPSEEK_MODEL` | `deepseek-v4-flash` | Default model. |
 | `DEEPSEEK_MODELS` | *(defaults)* | Comma-separated list of selectable models (defaults: `DEEPSEEK_MODEL`, `deepseek-chat`, `deepseek-reasoner`). |
+| `LLM_API_FORMAT` (alias `DEEPSEEK_API_FORMAT`) | `chat` | LLM wire format: `chat` (OpenAI chat completions), `responses` (OpenAI Responses API), or `anthropic` (Anthropic messages API). |
+| `DEEPSEEK_TIMEOUT_MS` | `120000` | LLM request timeout in ms (connect timeout for streaming calls). |
+| `DEEPSEEK_MAX_RETRIES` | `4` | Retries for retryable LLM failures (network errors, 408/409/425/429, 5xx; `Retry-After` is honored). |
+| `DEEPSEEK_RETRY_BASE_MS` | `1000` | Base delay for the exponential backoff between LLM retries (full jitter). |
+| `DEEPSEEK_RETRY_MAX_MS` | `30000` | Maximum delay between LLM retries. |
 | `WORKSPACE_DIR` | `.` | Default workspace directory (used when no project is active). Shell commands run here. |
 | `DATABASE_PATH` | `./yoke.db` | SQLite database file (users, sessions, projects, index, context, usage). |
 | `PORT` | `8080` | HTTP port. |
@@ -174,6 +179,68 @@ project's model (if set) overrides the user's selected model.
 - Or in the chat: `/project`, `/project <name>`, `/project create <name> <path> [model=<model>]`, `/project update <name> path=<dir> [model=<model>]`, `/project delete <name>`.
 - Each project gets its own conversation context (run `/reindex` after switching to index its files).
 
+## Docker
+
+Run Yoke in a container and let the agent build/test code inside it — shell
+commands run in the container, isolated from the host.
+
+Two image flavors:
+
+- **`yoke:slim`** — just the compiled binary (Debian trixie-slim).
+- **`yoke:full`** — adds `git`, `build-essential` (gcc/make), Node.js, Python,
+  Deno, curl, and an SSH client, so most projects can be built out of the box.
+
+Build:
+
+```
+docker build --target slim -t yoke:slim .
+docker build --target full -t yoke:full .
+# or both at once (tags them yoke:slim-<tag> / yoke:full-<tag>, default tag: latest):
+./scripts/docker-build.sh [tag]
+```
+
+Run with a host workspace mounted (the agent edits real files; builds happen
+in the container):
+
+```
+docker run --rm -d -p 8080:8080 \
+  -v "$(pwd)/workspace:/workspace" \
+  -v yoke-data:/data \
+  -e DEEPSEEK_API_KEY=your-key \
+  --name yoke \
+  yoke:full
+```
+
+Or with Docker Compose (`docker compose up -d`), which wires the same
+settings and reads `DEEPSEEK_API_KEY` etc. from `.env`:
+
+```
+# .env
+DEEPSEEK_API_KEY=your-key
+ENABLE_HTTPS=0
+```
+
+Create a user (no registration in the UI — same CLI as the binary):
+
+```
+docker compose run --rm yoke create-user alice password123
+# or: docker run --rm -v yoke-data:/data yoke:full create-user alice password123
+```
+
+Notes:
+
+- The database and TLS certificates persist in the `yoke-data` volume
+  (`/data`). With `ENABLE_HTTPS=1` the self-signed cert is generated and
+  stored there on first start.
+- The workspace bind-mount (`./workspace:/workspace`) is the default in
+  `docker-compose.yml`; use a named volume instead if you want a fully
+  sandboxed, throwaway workspace.
+- The container runs as **root** — the container boundary is the sandbox, but
+  still only expose the port to networks you trust. YOLO mode (`/yolo on`) is
+  a good fit for containers since commands stay inside the sandbox.
+- Extend the image for more toolchains: `FROM yoke:full` and
+  `RUN apt-get update && apt-get install -y <package>`.
+
 ## API
 
 All `/api/*` endpoints (except login) require `Authorization: Bearer <token>`.
@@ -217,6 +284,23 @@ string, process list, or approval cards. The password used is the host's
 optional `sudo_password`, or the SSH password when the host uses password
 authentication. If neither is available, sudo commands are rejected with a
 clear error (or rely on passwordless sudo).
+
+SSH connections are pooled per host config and reused across exec/status/SFTP
+operations, with automatic retry (exponential backoff) on transient transport
+errors. Tune via `SSH_MAX_RETRIES` (default 3), `SSH_RETRY_BASE_MS` (default
+500), and `SFTP_TIMEOUT_MS` (default 120000).
+
+## Security
+
+The SQLite database (`yoke.db`, or `DATABASE_PATH`) stores **SSH host passwords
+and sudo passwords in plaintext** so Yoke can authenticate to your hosts.
+Treat the database file as a secret:
+
+- Restrict its file permissions: `chmod 600 yoke.db`.
+- Never commit it — `*.db` is already covered by `.gitignore`.
+- Back it up and share it only like you would a password file.
+
+User account passwords are **not** affected — they are hashed with PBKDF2-SHA256.
 
 ## Notes
 
