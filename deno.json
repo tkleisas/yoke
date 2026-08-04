@@ -1,5 +1,5 @@
 {
-  "version": "0.6.1",
+  "version": "0.6.2",
   "tasks": {
     "test": "deno test --env-file=.env.test --allow-env --allow-read --allow-write --allow-net --allow-run tests/",
     "check": "deno check main.ts agent.ts llm.ts tools.ts index.ts auth.ts context.ts models.ts projects.ts subagents.ts web.ts approvals.ts hosts.ts certs.ts db.ts create-user.ts yolo.ts shells.ts tests/llm_test.ts tests/agent_test.ts"

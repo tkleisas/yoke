@@ -99,6 +99,10 @@ export async function runShellCommand(
   signal?: AbortSignal,
 ): Promise<string> {
   const shell = IS_WINDOWS ? "cmd" : "sh";
+  // The default workspace may not exist yet (fresh clone, CI); a missing
+  // cwd makes the spawn fail with an opaque NotFound. Custom cwds are left
+  // to fail loudly — auto-creating a typo'd directory would hide errors.
+  if (cwd === workspacePath) await ensureWorkspace();
   // Output goes to temp files: Deno's .output() waits for stdout EOF, which
   // never arrives if a child keeps the pipe open after the shell is killed.
   // Reading the files after the shell exits makes timeout/stop reliable.
